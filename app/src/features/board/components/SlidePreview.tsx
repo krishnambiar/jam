@@ -1,26 +1,31 @@
 import { BOARD_HEIGHT, BOARD_WIDTH } from '../constants';
-import type { CanvasImage } from '../types';
+import type { CanvasItem } from '../types';
+import { StickyNoteContent } from './StickyNoteContent';
 
 type SlidePreviewProps = {
-  images: CanvasImage[];
+  items: CanvasItem[];
 };
 
-export function SlidePreview({ images }: SlidePreviewProps) {
+export function SlidePreview({ items }: SlidePreviewProps) {
   return (
     <span className="slide-preview-canvas" aria-hidden="true">
-      {images.map((image) => (
+      {items.map((item) => (
         <span
-          key={image.id}
+          key={item.id}
           className="slide-preview-item"
           style={{
-            left: `${(image.x / BOARD_WIDTH) * 100}%`,
-            top: `${(image.y / BOARD_HEIGHT) * 100}%`,
-            width: `${(image.width / BOARD_WIDTH) * 100}%`,
-            height: `${(image.height / BOARD_HEIGHT) * 100}%`,
-            transform: `translate(-50%, -50%) rotate(${image.rotation}deg)`,
+            left: `${(item.x / BOARD_WIDTH) * 100}%`,
+            top: `${(item.y / BOARD_HEIGHT) * 100}%`,
+            width: `${(item.width / BOARD_WIDTH) * 100}%`,
+            height: `${(item.height / BOARD_HEIGHT) * 100}%`,
+            transform: `translate(-50%, -50%) rotate(${item.rotation}deg)`,
           }}
         >
-          <img src={image.src} alt="" draggable={false} />
+          {item.kind === 'image' ? (
+            <img src={item.src} alt="" draggable={false} />
+          ) : (
+            <StickyNoteContent note={item} />
+          )}
         </span>
       ))}
     </span>

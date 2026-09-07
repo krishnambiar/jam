@@ -1,15 +1,21 @@
 import type { LucideIcon } from 'lucide-react';
 
 export type Tool = {
+  id:
+    | 'pen'
+    | 'eraser'
+    | 'select'
+    | 'sticky-note'
+    | 'shape'
+    | 'text-box'
+    | 'laser-pointer';
   label: string;
   icon: LucideIcon | null;
   menu?: boolean;
 };
 
-export type CanvasImage = {
+export type CanvasTransform = {
   id: string;
-  src: string;
-  name: string;
   x: number;
   y: number;
   width: number;
@@ -17,10 +23,32 @@ export type CanvasImage = {
   rotation: number;
 };
 
+export type CanvasImage = CanvasTransform & {
+  kind: 'image';
+  src: string;
+  name: string;
+};
+
+export type StickyNoteColor =
+  | 'yellow'
+  | 'green'
+  | 'blue'
+  | 'pink'
+  | 'orange'
+  | 'transparent';
+
+export type CanvasStickyNote = CanvasTransform & {
+  kind: 'sticky-note';
+  text: string;
+  color: StickyNoteColor;
+};
+
+export type CanvasItem = CanvasImage | CanvasStickyNote;
+
 export type HistoryState = {
-  past: CanvasImage[][];
-  present: CanvasImage[];
-  future: CanvasImage[][];
+  past: CanvasItem[][];
+  present: CanvasItem[];
+  future: CanvasItem[][];
 };
 
 export type Slide = {
@@ -57,8 +85,8 @@ export type Gesture = {
   kind: 'move' | 'resize' | 'rotate';
   pointerId: number;
   slideId: string;
-  imageId: string;
-  initialImage: CanvasImage;
+  itemId: string;
+  initialItem: CanvasItem;
   boardRect: BoardRect;
   startPoint: Point;
   startAngle?: number;

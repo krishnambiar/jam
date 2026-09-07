@@ -300,6 +300,7 @@ select {
 .slide-preview-item {
   position: absolute;
   display: block;
+  container-type: inline-size;
   transform-origin: center;
 }
 
@@ -667,7 +668,7 @@ select {
   width: min(calc(100vw - 182px), calc((100dvh - 140px) * 16 / 9));
   max-width: calc(100vw - 92px);
   aspect-ratio: 16 / 9;
-  overflow: hidden;
+  overflow: clip;
   border: 1px solid var(--line);
   outline: none;
   background: #fff;
@@ -682,6 +683,7 @@ select {
 .canvas-item {
   position: absolute;
   z-index: 1;
+  container-type: inline-size;
   transform: translate(-50%, -50%);
 }
 
@@ -689,7 +691,7 @@ select {
   z-index: 20;
 }
 
-.canvas-image-frame {
+.canvas-item-frame {
   position: relative;
   width: 100%;
   height: 100%;
@@ -698,7 +700,7 @@ select {
   touch-action: none;
 }
 
-.canvas-image-frame:active {
+.canvas-item-frame:active {
   cursor: grabbing;
 }
 
@@ -712,8 +714,99 @@ select {
   -webkit-user-drag: none;
 }
 
-.canvas-image-frame.is-selected .canvas-image {
+.canvas-item-frame.is-selected .canvas-image {
   box-shadow: 0 5px 12px rgb(60 64 67 / 24%);
+}
+
+.sticky-note-surface {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  color: #000;
+  background: var(--sticky-note-color);
+  box-shadow: 0 2px 3px rgb(60 64 67 / 28%);
+  pointer-events: none;
+}
+
+.canvas-item-frame.is-selected .sticky-note-surface {
+  box-shadow: 0 3px 14px rgb(60 64 67 / 30%);
+}
+
+.sticky-note-surface.is-transparent,
+.canvas-item-frame.is-selected .sticky-note-surface.is-transparent {
+  box-shadow: none;
+}
+
+.sticky-note-copy-shell {
+  position: absolute;
+  inset: 8%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+}
+
+.sticky-note-surface.is-overflowing .sticky-note-copy-shell {
+  align-items: flex-start;
+}
+
+.sticky-note-copy,
+.sticky-note-measure {
+  padding: 0;
+  border: 0;
+  color: #000;
+  background: transparent;
+  font-family: 'Roboto', Arial, Helvetica, sans-serif;
+  font-size: var(--sticky-font-size);
+  font-weight: 700;
+  line-height: 1.07;
+  letter-spacing: 0;
+  text-align: center;
+  white-space: pre-wrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.sticky-note-copy {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 1.07em;
+  flex: none;
+  margin: 0;
+  overflow: visible;
+  outline: none;
+  pointer-events: none;
+}
+
+.sticky-note-surface.is-dense .sticky-note-copy,
+.sticky-note-surface.is-dense .sticky-note-measure {
+  text-align: left;
+}
+
+.sticky-note-editor {
+  resize: none;
+  appearance: none;
+  caret-color: color-mix(in srgb, var(--sticky-note-color) 82%, #000);
+  pointer-events: auto;
+  scrollbar-width: none;
+}
+
+.sticky-note-surface.is-transparent .sticky-note-editor {
+  caret-color: #5f6368;
+}
+
+.sticky-note-editor::-webkit-scrollbar {
+  display: none;
+}
+
+.sticky-note-measure {
+  position: absolute;
+  inset: 8%;
+  visibility: hidden;
+  overflow: visible;
+  pointer-events: none;
 }
 
 .selection-outline {
@@ -879,8 +972,154 @@ select {
   stroke-width: 2;
 }
 
-.item-menu-popover .delete-image-action {
+.item-menu-popover .delete-item-action {
   color: #b3261e;
+}
+
+.note-color-anchor {
+  position: absolute;
+  z-index: 7;
+  right: -27px;
+  bottom: -27px;
+  width: 54px;
+  height: 54px;
+  transform: rotate(var(--counter-rotation));
+  transform-origin: 27px 27px;
+}
+
+.note-color-anchor.is-open {
+  right: -29px;
+  bottom: -29px;
+  width: min(368px, calc(100vw - 116px));
+  height: 58px;
+  transform-origin: calc(100% - 29px) 29px;
+}
+
+.note-color-anchor.is-contained-right {
+  right: 0;
+  transform-origin: 100% 27px;
+}
+
+.note-color-anchor.is-contained-bottom {
+  bottom: 0;
+  transform-origin: 27px 100%;
+}
+
+.note-color-anchor.is-contained-right.is-contained-bottom {
+  transform-origin: 100% 100%;
+}
+
+.note-color-anchor.is-open.opens-right:not(.is-contained-right) {
+  right: auto;
+  left: calc(100% - 29px);
+  transform-origin: 29px 29px;
+}
+
+.note-color-anchor.is-open.is-contained-right {
+  right: 0;
+  left: auto;
+  transform-origin: 100% 29px;
+}
+
+.note-color-anchor.is-open.is-contained-bottom {
+  bottom: 0;
+  transform-origin: calc(100% - 29px) 100%;
+}
+
+.note-color-anchor.is-open.opens-right.is-contained-bottom:not(
+    .is-contained-right
+  ) {
+  transform-origin: 29px 100%;
+}
+
+.note-color-anchor.is-open.is-contained-right.is-contained-bottom {
+  transform-origin: 100% 100%;
+}
+
+.note-color-trigger,
+.note-color-options {
+  width: 100%;
+  height: 100%;
+  border: 1px solid #eceff1;
+  outline: none;
+  background: #fff;
+  box-shadow: 0 3px 13px rgb(60 64 67 / 28%);
+}
+
+.note-color-trigger {
+  display: grid;
+  padding: 0;
+  place-items: center;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.note-color-trigger:hover {
+  background: #f8f9fa;
+}
+
+.note-color-trigger:focus-visible,
+.note-color-choice:focus-visible {
+  box-shadow: 0 0 0 2px var(--blue), 0 3px 13px rgb(60 64 67 / 28%);
+}
+
+.note-color-trigger > span,
+.note-color-choice > span {
+  position: relative;
+  display: block;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+}
+
+.note-color-trigger > span.is-no-fill,
+.note-color-choice.is-no-fill > span {
+  border: 1px solid #dadce0;
+  background: #fff !important;
+}
+
+.note-color-trigger > span.is-no-fill::after,
+.note-color-choice.is-no-fill > span::after {
+  position: absolute;
+  top: 10px;
+  left: -2px;
+  width: 27px;
+  height: 2px;
+  border-radius: 1px;
+  background: #c7cbd0;
+  content: '';
+  transform: rotate(-45deg);
+  transform-origin: center;
+}
+
+.note-color-options {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  align-items: center;
+  padding: 0;
+  border-radius: 29px;
+}
+
+.note-color-choice {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  margin: 0 auto;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  outline: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.note-color-choice:hover {
+  background: #f1f3f4;
+}
+
+.note-color-choice > span {
+  background: var(--note-swatch-color);
 }
 
 .item-menu-divider {

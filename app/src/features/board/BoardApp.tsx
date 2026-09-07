@@ -20,10 +20,12 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 
 import { SlidePreview } from './components/SlidePreview';
+import { StickyNoteContent } from './components/StickyNoteContent';
 import { ToolButton } from './components/ToolButton';
 import {
   BOARD_HEIGHT,
@@ -32,18 +34,25 @@ import {
   HISTORY_LIMIT,
   INITIAL_SLIDE_ID,
   MAX_SLIDES,
+  STICKY_NOTE_SIZE,
   createEmptySlide,
+  getStickyNoteColorValue,
   resizeCorners,
+  stickyNoteColors,
   tools,
 } from './constants';
 import type {
   BoardRect,
   CanvasImage,
+  CanvasItem,
+  CanvasStickyNote,
   DeckHistoryState,
   Gesture,
   HistoryState,
   ResizeCorner,
   SlideDeck,
+  StickyNoteColor,
+  Tool,
 } from './types';
 import {
   addDeckToPast,
@@ -54,11 +63,43 @@ import {
   fittedImageSize,
   isTextEntry,
   normalizeRotation,
-  resizedImage,
+  resizedItem,
+  rotatedItemExtents,
 } from './utils';
 
+type StickyNoteEdit = {
+  itemId: string;
+  slideId: string;
+  draft: string;
+};
+
+function moveColorChoiceFocus(event: ReactKeyboardEvent<HTMLButtonElement>) {
+  const direction =
+    event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+      ? -1
+      : event.key === 'ArrowRight' || event.key === 'ArrowDown'
+        ? 1
+        : 0;
+  const group = event.currentTarget.closest('[role="radiogroup"]');
+  const choices = Array.from(
+    group?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ?? [],
+  );
+  let nextIndex = choices.indexOf(event.currentTarget);
+
+  if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = choices.length - 1;
+  else if (direction !== 0 && choices.length > 0) {
+    nextIndex = (nextIndex + direction + choices.length) % choices.length;
+  } else {
+    return;
+  }
+
+  event.preventDefault();
+  choices[nextIndex]?.focus();
+}
+
 export default function BoardApp() {
-  const [selectedTool, setSelectedTool] = useState(2);
+  const [selectedToolId, setSelectedToolId] = useState<Tool['id']>('select');
   const [deckHistory, setDeckHistory] = useState<DeckHistoryState>(() => ({
     past: [],
     present: {
@@ -73,8 +114,12 @@ export default function BoardApp() {
     left: false,
     right: false,
   });
-  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
-  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [openItemMenuId, setOpenItemMenuId] = useState<string | null>(null);
+  const [openColorPickerId, setOpenColorPickerId] = useState<string | null>(null);
+  const [stickyNoteEdit, setStickyNoteEdit] = useState<StickyNoteEdit | null>(
+    null,
+  );
   const [openSlideMenuId, setOpenSlideMenuId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const boardRef = useRef<HTMLDivElement>(null);
@@ -82,6 +127,8 @@ export default function BoardApp() {
   const activeThumbnailRef = useRef<HTMLButtonElement>(null);
   const slideMenuButtonRef = useRef<HTMLButtonElement>(null);
   const frameCounterRef = useRef<HTMLButtonElement>(null);
+  const activeColorChoiceRef = useRef<HTMLButtonElement>(null);
+  const focusColorPickerOnOpenRef = useRef(false);
   const gestureRef = useRef<Gesture | null>(null);
   const activeSlideIdRef = useRef(deck.activeSlideId);
   const wasSlideOverviewOpenRef = useRef(false);
@@ -160,8 +207,8 @@ export default function BoardApp() {
               ...slide,
               history: {
                 ...slide.history,
-                present: slide.history.present.map((image) =>
-                  image.id === gesture.imageId ? gesture.initialImage : image,
+                present: slide.history.present.map((item) =>
+                  item.id === gesture.itemId ? gesture.initialItem : item,
                 ),
               },
             }
@@ -171,7 +218,7 @@ export default function BoardApp() {
   }, [setDeck]);
 
   const commit = useCallback(
-    (update: (images: CanvasImage[]) => CanvasImage[]) => {
+    (update: (items: CanvasItem[]) => CanvasItem[]) => {
       cancelActiveGesture();
       updateActiveHistory((current) => {
         const next = update(current.present);
@@ -189,9 +236,11 @@ export default function BoardApp() {
 
   const undo = useCallback(() => {
     cancelActiveGesture();
-    setOpenMenuId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+    setStickyNoteEdit(null);
     closeSlideMenu(openSlideMenuId !== null);
-    setSelectedImageId(null);
+    setSelectedItemId(null);
     setDeckHistory((current) => {
       const previous = current.past.at(-1);
       if (!previous) return current;
@@ -206,9 +255,11 @@ export default function BoardApp() {
 
   const redo = useCallback(() => {
     cancelActiveGesture();
-    setOpenMenuId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+    setStickyNoteEdit(null);
     closeSlideMenu(openSlideMenuId !== null);
-    setSelectedImageId(null);
+    setSelectedItemId(null);
     setDeckHistory((current) => {
       const next = current.future[0];
       if (!next) return current;
@@ -224,8 +275,10 @@ export default function BoardApp() {
   const deleteSlide = useCallback(
     (slideId: string) => {
       cancelActiveGesture();
-      setSelectedImageId(null);
-      setOpenMenuId(null);
+      setSelectedItemId(null);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setStickyNoteEdit(null);
       closeSlideMenu();
       setDeckHistory((current) => {
         if (current.present.slides.length <= 1) return current;
@@ -256,8 +309,10 @@ export default function BoardApp() {
   const navigateToAdjacentSlide = useCallback(
     (direction: -1 | 1) => {
       cancelActiveGesture();
-      setSelectedImageId(null);
-      setOpenMenuId(null);
+      setSelectedItemId(null);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setStickyNoteEdit(null);
       closeSlideMenu();
       setDeck((current) => {
         const currentIndex = current.slides.findIndex(
@@ -272,38 +327,165 @@ export default function BoardApp() {
     [cancelActiveGesture, closeSlideMenu, setDeck],
   );
 
-  const deleteImage = useCallback(
-    (imageId: string) => {
-      commit((images) => {
-        if (!images.some((image) => image.id === imageId)) return images;
-        return images.filter((image) => image.id !== imageId);
+  const deleteItem = useCallback(
+    (itemId: string) => {
+      commit((items) => {
+        if (!items.some((item) => item.id === itemId)) return items;
+        return items.filter((item) => item.id !== itemId);
       });
-      setSelectedImageId((current) => (current === imageId ? null : current));
-      setOpenMenuId(null);
+      setSelectedItemId((current) => (current === itemId ? null : current));
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setStickyNoteEdit((current) =>
+        current?.itemId === itemId ? null : current,
+      );
     },
     [commit],
   );
 
-  const rotateImage = useCallback(
-    (imageId: string, degrees: number) => {
-      commit((images) =>
-        images.map((image) =>
-          image.id === imageId
-            ? { ...image, rotation: normalizeRotation(image.rotation + degrees) }
-            : image,
+  const rotateItem = useCallback(
+    (itemId: string, degrees: number) => {
+      commit((items) =>
+        items.map((item) =>
+          item.id === itemId
+            ? { ...item, rotation: normalizeRotation(item.rotation + degrees) }
+            : item,
         ),
       );
-      setOpenMenuId(null);
+      setOpenItemMenuId(null);
     },
     [commit],
+  );
+
+  const finishStickyNoteEdit = useCallback(() => {
+    if (!stickyNoteEdit) return;
+    setStickyNoteEdit(null);
+
+    if (activeSlideIdRef.current !== stickyNoteEdit.slideId) return;
+    commit((items) => {
+      const note = items.find((item) => item.id === stickyNoteEdit.itemId);
+      if (
+        !note ||
+        note.kind !== 'sticky-note' ||
+        note.text === stickyNoteEdit.draft
+      ) {
+        return items;
+      }
+
+      return items.map((item) =>
+        item.id === stickyNoteEdit.itemId && item.kind === 'sticky-note'
+          ? { ...item, text: stickyNoteEdit.draft }
+          : item,
+      );
+    });
+  }, [commit, stickyNoteEdit]);
+
+  const beginStickyNoteEdit = useCallback(
+    (note: CanvasStickyNote) => {
+      const draft =
+        stickyNoteEdit?.itemId === note.id ? stickyNoteEdit.draft : note.text;
+      finishStickyNoteEdit();
+      cancelActiveGesture();
+      setSelectedItemId(note.id);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setStickyNoteEdit({
+        itemId: note.id,
+        slideId: deck.activeSlideId,
+        draft,
+      });
+    },
+    [
+      cancelActiveGesture,
+      deck.activeSlideId,
+      finishStickyNoteEdit,
+      stickyNoteEdit,
+    ],
+  );
+
+  const createStickyNote = useCallback(() => {
+    finishStickyNoteEdit();
+    const id = crypto.randomUUID();
+    const note = {
+      kind: 'sticky-note',
+      id,
+      text: '',
+      color: 'yellow',
+      x: BOARD_WIDTH / 2,
+      y: BOARD_HEIGHT / 2,
+      width: STICKY_NOTE_SIZE,
+      height: STICKY_NOTE_SIZE,
+      rotation: 0,
+    } satisfies CanvasStickyNote;
+
+    commit((items) => {
+      const offset = (items.length % 5) * 22;
+      return [
+        ...items,
+        {
+          ...note,
+          x: clamp(
+            note.x + offset,
+            note.width / 2,
+            BOARD_WIDTH - note.width / 2,
+          ),
+          y: clamp(
+            note.y + offset,
+            note.height / 2,
+            BOARD_HEIGHT - note.height / 2,
+          ),
+        },
+      ];
+    });
+    setSelectedToolId('select');
+    setSelectedItemId(id);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+    setStickyNoteEdit({
+      itemId: id,
+      slideId: deck.activeSlideId,
+      draft: '',
+    });
+  }, [commit, deck.activeSlideId, finishStickyNoteEdit]);
+
+  const changeStickyNoteColor = useCallback(
+    (itemId: string, color: StickyNoteColor) => {
+      commit((items) => {
+        const note = items.find((item) => item.id === itemId);
+        if (!note || note.kind !== 'sticky-note' || note.color === color) {
+          return items;
+        }
+
+        return items.map((item) =>
+          item.id === itemId && item.kind === 'sticky-note'
+            ? { ...item, color }
+            : item,
+        );
+      });
+      setOpenColorPickerId(null);
+    },
+    [commit],
+  );
+
+  const selectTool = useCallback(
+    (tool: Tool) => {
+      if (tool.id === 'sticky-note') {
+        createStickyNote();
+        return;
+      }
+      finishStickyNoteEdit();
+      setSelectedToolId(tool.id);
+    },
+    [createStickyNote, finishStickyNoteEdit],
   );
 
   const pasteImages = useCallback(
     async (files: File[]) => {
       const targetSlideId = activeSlideIdRef.current;
       cancelActiveGesture();
-      setSelectedImageId(null);
-      setOpenMenuId(null);
+      setSelectedItemId(null);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
       const results = await Promise.allSettled(files.map(decodeImageFile));
       const decoded = results.flatMap((result) =>
         result.status === 'fulfilled' ? [result.value] : [],
@@ -319,6 +501,7 @@ export default function BoardApp() {
       const additions = decoded.map((image) => {
         const size = fittedImageSize(image.naturalWidth, image.naturalHeight);
         return {
+          kind: 'image',
           id: crypto.randomUUID(),
           src: image.src,
           name: image.name,
@@ -334,8 +517,8 @@ export default function BoardApp() {
       const concurrentGesture =
         gestureAtCompletion?.slideId === targetSlideId
           ? {
-              imageId: gestureAtCompletion.imageId,
-              initialImage: gestureAtCompletion.initialImage,
+              itemId: gestureAtCompletion.itemId,
+              initialItem: gestureAtCompletion.initialItem,
             }
           : null;
 
@@ -345,11 +528,11 @@ export default function BoardApp() {
         );
         if (!targetSlide) return current;
 
-        const beforeImages = concurrentGesture
-          ? targetSlide.history.present.map((currentImage) =>
-              currentImage.id === concurrentGesture.imageId
-                ? concurrentGesture.initialImage
-                : currentImage,
+        const beforeItems = concurrentGesture
+          ? targetSlide.history.present.map((currentItem) =>
+              currentItem.id === concurrentGesture.itemId
+                ? concurrentGesture.initialItem
+                : currentItem,
             )
           : targetSlide.history.present;
         const positioned = additions.map((image, index) => {
@@ -375,7 +558,7 @@ export default function BoardApp() {
                 slide.id === targetSlideId
                   ? {
                       ...slide,
-                      history: { ...slide.history, present: beforeImages },
+                      history: { ...slide.history, present: beforeItems },
                     }
                   : slide,
               ),
@@ -386,7 +569,7 @@ export default function BoardApp() {
             ? {
                 ...slide,
                 history: {
-                  past: addToPast(slide.history.past, beforeImages),
+                  past: addToPast(slide.history.past, beforeItems),
                   present: [...slide.history.present, ...positioned],
                   future: [],
                 },
@@ -401,10 +584,11 @@ export default function BoardApp() {
         };
       });
       if (activeSlideIdRef.current === targetSlideId) {
-        setSelectedImageId(
-          concurrentGesture?.imageId ?? additions.at(-1)?.id ?? null,
+        setSelectedItemId(
+          concurrentGesture?.itemId ?? additions.at(-1)?.id ?? null,
         );
-        setOpenMenuId(null);
+        setOpenItemMenuId(null);
+        setOpenColorPickerId(null);
         setNotice(
           additions.length === 1
             ? 'Image pasted. Drag to move it and use the blue corners to resize.'
@@ -449,8 +633,9 @@ export default function BoardApp() {
         }
 
         closeSlideOverview('counter');
-        setOpenMenuId(null);
-        setSelectedImageId(null);
+        setOpenItemMenuId(null);
+        setOpenColorPickerId(null);
+        setSelectedItemId(null);
         return;
       }
 
@@ -473,7 +658,7 @@ export default function BoardApp() {
       const isHorizontalArrow =
         event.key === 'ArrowLeft' || event.key === 'ArrowRight';
       const canNavigateWithArrows =
-        isSlideOverviewOpen || (!selectedImageId && !openMenuId);
+        isSlideOverviewOpen || (!selectedItemId && !openItemMenuId);
 
       if (
         isHorizontalArrow &&
@@ -499,9 +684,9 @@ export default function BoardApp() {
 
       if (isSlideOverviewOpen) return;
 
-      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedImageId) {
+      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedItemId) {
         event.preventDefault();
-        deleteImage(selectedImageId);
+        deleteItem(selectedItemId);
         return;
       }
 
@@ -513,14 +698,14 @@ export default function BoardApp() {
     closeSlideOverview,
     closeSlideMenu,
     deck.activeSlideId,
-    deleteImage,
+    deleteItem,
     deleteSlide,
     isSlideOverviewOpen,
     navigateToAdjacentSlide,
-    openMenuId,
+    openItemMenuId,
     openSlideMenuId,
     redo,
-    selectedImageId,
+    selectedItemId,
     undo,
   ]);
 
@@ -531,17 +716,44 @@ export default function BoardApp() {
   }, [notice]);
 
   useEffect(() => {
-    if (!openMenuId) return;
+    if (!openItemMenuId) return;
 
     const closeMenu = (event: PointerEvent) => {
       if (!(event.target instanceof Element)) return;
-      if (event.target.closest(`[data-item-menu="${openMenuId}"]`)) return;
-      setOpenMenuId(null);
+      if (event.target.closest(`[data-item-menu="${openItemMenuId}"]`)) return;
+      setOpenItemMenuId(null);
     };
 
     document.addEventListener('pointerdown', closeMenu, true);
     return () => document.removeEventListener('pointerdown', closeMenu, true);
-  }, [openMenuId]);
+  }, [openItemMenuId]);
+
+  useEffect(() => {
+    if (!openColorPickerId) return;
+
+    const closeColorPicker = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return;
+      if (
+        event.target.closest(`[data-note-color-picker="${openColorPickerId}"]`)
+      ) {
+        return;
+      }
+      setOpenColorPickerId(null);
+    };
+
+    document.addEventListener('pointerdown', closeColorPicker, true);
+    return () =>
+      document.removeEventListener('pointerdown', closeColorPicker, true);
+  }, [openColorPickerId]);
+
+  useEffect(() => {
+    if (!openColorPickerId || !focusColorPickerOnOpenRef.current) return;
+    focusColorPickerOnOpenRef.current = false;
+    const animationFrame = window.requestAnimationFrame(() => {
+      activeColorChoiceRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [openColorPickerId]);
 
   useEffect(() => {
     if (!openSlideMenuId) return;
@@ -559,7 +771,7 @@ export default function BoardApp() {
 
   const startGesture = (
     event: ReactPointerEvent<HTMLElement>,
-    image: CanvasImage,
+    item: CanvasItem,
     kind: Gesture['kind'],
     corner?: ResizeCorner,
   ) => {
@@ -567,6 +779,11 @@ export default function BoardApp() {
 
     event.preventDefault();
     event.stopPropagation();
+    const itemAtStart =
+      item.kind === 'sticky-note' && stickyNoteEdit?.itemId === item.id
+        ? { ...item, text: stickyNoteEdit.draft }
+        : item;
+    finishStickyNoteEdit();
     const rect = boardRef.current.getBoundingClientRect();
     const compactRect: BoardRect = {
       left: rect.left,
@@ -580,21 +797,23 @@ export default function BoardApp() {
       kind,
       pointerId: event.pointerId,
       slideId: deck.activeSlideId,
-      imageId: image.id,
-      initialImage: image,
+      itemId: itemAtStart.id,
+      initialItem: itemAtStart,
       boardRect: compactRect,
       startPoint,
       startAngle:
         kind === 'rotate'
-          ? Math.atan2(startPoint.y - image.y, startPoint.x - image.x) *
+          ? Math.atan2(startPoint.y - itemAtStart.y, startPoint.x - itemAtStart.x) *
             (180 / Math.PI)
           : undefined,
       corner,
       moved: false,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
-    setSelectedImageId(image.id);
-    setOpenMenuId(null);
+    setSelectedToolId('select');
+    setSelectedItemId(itemAtStart.id);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -603,43 +822,43 @@ export default function BoardApp() {
 
     event.preventDefault();
     const point = boardPoint(event.clientX, event.clientY, gesture.boardRect);
-    const image = gesture.initialImage;
-    let nextImage = image;
+    const item = gesture.initialItem;
+    let nextItem = item;
 
     if (gesture.kind === 'move') {
       const deltaX = point.x - gesture.startPoint.x;
       const deltaY = point.y - gesture.startPoint.y;
-      const radians = (image.rotation * Math.PI) / 180;
-      const horizontalExtent =
-        (Math.abs(Math.cos(radians)) * image.width +
-          Math.abs(Math.sin(radians)) * image.height) /
-        2;
-      const verticalExtent =
-        (Math.abs(Math.sin(radians)) * image.width +
-          Math.abs(Math.cos(radians)) * image.height) /
-        2;
+      const extents = rotatedItemExtents(item);
 
-      nextImage = {
-        ...image,
-        x: clamp(image.x + deltaX, horizontalExtent, BOARD_WIDTH - horizontalExtent),
-        y: clamp(image.y + deltaY, verticalExtent, BOARD_HEIGHT - verticalExtent),
+      nextItem = {
+        ...item,
+        x: clamp(
+          item.x + deltaX,
+          extents.horizontal,
+          BOARD_WIDTH - extents.horizontal,
+        ),
+        y: clamp(
+          item.y + deltaY,
+          extents.vertical,
+          BOARD_HEIGHT - extents.vertical,
+        ),
       };
     } else if (gesture.kind === 'resize' && gesture.corner) {
-      nextImage = resizedImage(image, gesture.corner, point);
+      nextItem = resizedItem(item, gesture.corner, point);
     } else if (gesture.kind === 'rotate' && gesture.startAngle !== undefined) {
       const pointerAngle =
-        Math.atan2(point.y - image.y, point.x - image.x) * (180 / Math.PI);
-      let rotation = image.rotation + pointerAngle - gesture.startAngle;
+        Math.atan2(point.y - item.y, point.x - item.x) * (180 / Math.PI);
+      let rotation = item.rotation + pointerAngle - gesture.startAngle;
       if (event.shiftKey) rotation = Math.round(rotation / 15) * 15;
-      nextImage = { ...image, rotation };
+      nextItem = { ...item, rotation };
     }
 
     const changed =
-      Math.abs(nextImage.x - image.x) > 0.01 ||
-      Math.abs(nextImage.y - image.y) > 0.01 ||
-      Math.abs(nextImage.width - image.width) > 0.01 ||
-      Math.abs(nextImage.height - image.height) > 0.01 ||
-      Math.abs(nextImage.rotation - image.rotation) > 0.01;
+      Math.abs(nextItem.x - item.x) > 0.01 ||
+      Math.abs(nextItem.y - item.y) > 0.01 ||
+      Math.abs(nextItem.width - item.width) > 0.01 ||
+      Math.abs(nextItem.height - item.height) > 0.01 ||
+      Math.abs(nextItem.rotation - item.rotation) > 0.01;
 
     if (!changed) return;
     gesture.moved = true;
@@ -654,8 +873,8 @@ export default function BoardApp() {
                 ...slide,
                 history: {
                   ...slide.history,
-                  present: slide.history.present.map((currentImage) =>
-                    currentImage.id === gesture.imageId ? nextImage : currentImage,
+                  present: slide.history.present.map((currentItem) =>
+                    currentItem.id === gesture.itemId ? nextItem : currentItem,
                   ),
                 },
               }
@@ -680,8 +899,8 @@ export default function BoardApp() {
       );
       if (!targetSlide) return current;
 
-      const beforeImages = targetSlide.history.present.map((image) =>
-        image.id === gesture.imageId ? gesture.initialImage : image,
+      const beforeItems = targetSlide.history.present.map((item) =>
+        item.id === gesture.itemId ? gesture.initialItem : item,
       );
       const beforeDeck = {
         ...current.present,
@@ -689,7 +908,7 @@ export default function BoardApp() {
           slide.id === gesture.slideId
             ? {
                 ...slide,
-                history: { ...slide.history, present: beforeImages },
+                history: { ...slide.history, present: beforeItems },
               }
             : slide,
         ),
@@ -699,11 +918,11 @@ export default function BoardApp() {
           ? {
               ...slide,
               history: {
-                past: addToPast(slide.history.past, beforeImages),
-                present: slide.history.present.map((image) =>
-                  image.id === gesture.imageId
-                    ? { ...image, rotation: normalizeRotation(image.rotation) }
-                    : image,
+                past: addToPast(slide.history.past, beforeItems),
+                present: slide.history.present.map((item) =>
+                  item.id === gesture.itemId
+                    ? { ...item, rotation: normalizeRotation(item.rotation) }
+                    : item,
                 ),
                 future: [],
               },
@@ -721,8 +940,10 @@ export default function BoardApp() {
 
   const clearCanvasSelection = useCallback(() => {
     cancelActiveGesture();
-    setSelectedImageId(null);
-    setOpenMenuId(null);
+    setSelectedItemId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+    setStickyNoteEdit(null);
     closeSlideMenu();
   }, [cancelActiveGesture, closeSlideMenu]);
 
@@ -868,7 +1089,7 @@ export default function BoardApp() {
     updateOverviewScrollAvailability,
   ]);
 
-  const images = history.present;
+  const items = history.present;
 
   return (
     <main className="app-shell">
@@ -984,7 +1205,7 @@ export default function BoardApp() {
                           aria-current={isActive ? 'page' : undefined}
                           onClick={() => selectSlide(slide.id)}
                         >
-                          <SlidePreview images={slide.history.present} />
+                          <SlidePreview items={slide.history.present} />
                         </button>
                         {isActive ? (
                           <div
@@ -1131,47 +1352,112 @@ export default function BoardApp() {
           className="board"
           role="region"
           tabIndex={0}
-          aria-label="Board. Paste an image, then drag it to move it."
+          aria-label="Board. Add sticky notes or paste images, then drag items to move them."
           onPointerDown={(event) => {
             if (event.currentTarget !== event.target) return;
-            setSelectedImageId(null);
-            setOpenMenuId(null);
+            setSelectedItemId(null);
+            setOpenItemMenuId(null);
+            setOpenColorPickerId(null);
           }}
           onPointerMove={handlePointerMove}
           onPointerUp={finishGesture}
           onPointerCancel={finishGesture}
         >
-          {images.map((image) => {
-            const isSelected = selectedImageId === image.id;
-            const isMenuOpen = openMenuId === image.id;
+          {items.map((item) => {
+            const isSelected = selectedItemId === item.id;
+            const isMenuOpen = openItemMenuId === item.id;
+            const isColorPickerOpen = openColorPickerId === item.id;
+            const itemLabel = item.kind === 'image' ? 'image' : 'sticky note';
+            const itemExtents = rotatedItemExtents(item);
+            const colorPickerPosition = [
+              item.x - itemExtents.horizontal < BOARD_WIDTH * 0.35
+                ? ' opens-right'
+                : '',
+              item.x + itemExtents.horizontal > BOARD_WIDTH - 96
+                ? ' is-contained-right'
+                : '',
+              item.y + itemExtents.vertical > BOARD_HEIGHT - 96
+                ? ' is-contained-bottom'
+                : '',
+            ].join('');
             const frameStyle = {
-              transform: `rotate(${image.rotation}deg)`,
-              '--counter-rotation': `${-image.rotation}deg`,
+              transform: `rotate(${item.rotation}deg)`,
+              '--counter-rotation': `${-item.rotation}deg`,
             } as CSSProperties;
 
             return (
               <div
-                key={image.id}
+                key={item.id}
                 className={`canvas-item${isSelected ? ' is-selected' : ''}`}
                 style={{
-                  left: `${(image.x / BOARD_WIDTH) * 100}%`,
-                  top: `${(image.y / BOARD_HEIGHT) * 100}%`,
-                  width: `${(image.width / BOARD_WIDTH) * 100}%`,
-                  height: `${(image.height / BOARD_HEIGHT) * 100}%`,
+                  left: `${(item.x / BOARD_WIDTH) * 100}%`,
+                  top: `${(item.y / BOARD_HEIGHT) * 100}%`,
+                  width: `${(item.width / BOARD_WIDTH) * 100}%`,
+                  height: `${(item.height / BOARD_HEIGHT) * 100}%`,
                 }}
-                data-image-id={image.id}
+                data-item-id={item.id}
+                data-item-type={item.kind}
               >
                 <div
-                  className={`canvas-image-frame${isSelected ? ' is-selected' : ''}`}
+                  className={`canvas-item-frame${isSelected ? ' is-selected' : ''}`}
                   style={frameStyle}
-                  onPointerDown={(event) => startGesture(event, image, 'move')}
+                  role="group"
+                  tabIndex={0}
+                  aria-label={
+                    item.kind === 'image'
+                      ? item.name
+                      : `Sticky note: ${item.text.trim() || 'Blank'}`
+                  }
+                  onDoubleClick={(event) => {
+                    if (item.kind !== 'sticky-note') return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    beginStickyNoteEdit(item);
+                  }}
+                  onFocus={(event) => {
+                    if (event.currentTarget !== event.target) return;
+                    setSelectedItemId(item.id);
+                    setOpenItemMenuId(null);
+                    setOpenColorPickerId(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (
+                      event.currentTarget !== event.target ||
+                      item.kind !== 'sticky-note' ||
+                      (event.key !== 'Enter' && event.key !== 'F2')
+                    ) {
+                      return;
+                    }
+                    event.preventDefault();
+                    beginStickyNoteEdit(item);
+                  }}
+                  onPointerDown={(event) => startGesture(event, item, 'move')}
                 >
-                  <img
-                    className="canvas-image"
-                    src={image.src}
-                    alt={image.name}
-                    draggable={false}
-                  />
+                  {item.kind === 'image' ? (
+                    <img
+                      className="canvas-image"
+                      src={item.src}
+                      alt={item.name}
+                      draggable={false}
+                    />
+                  ) : (
+                    <StickyNoteContent
+                      note={item}
+                      draft={
+                        stickyNoteEdit?.itemId === item.id
+                          ? stickyNoteEdit.draft
+                          : undefined
+                      }
+                      onDraftChange={(draft) =>
+                        setStickyNoteEdit((current) =>
+                          current?.itemId === item.id
+                            ? { ...current, draft }
+                            : current,
+                        )
+                      }
+                      onFinishEditing={finishStickyNoteEdit}
+                    />
+                  )}
 
                   {isSelected ? (
                     <>
@@ -1179,10 +1465,10 @@ export default function BoardApp() {
                       <button
                         type="button"
                         className="rotation-zone"
-                        aria-label="Rotate image"
-                        title="Drag around the image to rotate. Hold Shift to snap."
+                        aria-label={`Rotate ${itemLabel}`}
+                        title={`Drag around the ${itemLabel} to rotate. Hold Shift to snap.`}
                         onPointerDown={(event) =>
-                          startGesture(event, image, 'rotate')
+                          startGesture(event, item, 'rotate')
                         }
                       />
 
@@ -1191,28 +1477,132 @@ export default function BoardApp() {
                           key={corner}
                           type="button"
                           className={`resize-handle resize-${corner}`}
-                          aria-label={`Resize image from ${corner.toUpperCase()} corner`}
+                          aria-label={`Resize ${itemLabel} from ${corner.toUpperCase()} corner`}
                           title="Drag to resize"
                           onPointerDown={(event) =>
-                            startGesture(event, image, 'resize', corner)
+                            startGesture(event, item, 'resize', corner)
                           }
                         />
                       ))}
 
+                      {item.kind === 'sticky-note' ? (
+                        <div
+                          className={`note-color-anchor${
+                            isColorPickerOpen ? ' is-open' : ''
+                          }${colorPickerPosition}`}
+                          data-note-color-picker={item.id}
+                          onPointerDown={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                          }}
+                          onDoubleClick={(event) => event.stopPropagation()}
+                        >
+                          {isColorPickerOpen ? (
+                            <div
+                              className="note-color-options"
+                              role="radiogroup"
+                              aria-label="Sticky note color"
+                            >
+                              {stickyNoteColors.map((color) => (
+                                <button
+                                  key={color.id}
+                                  ref={
+                                    item.color === color.id
+                                      ? activeColorChoiceRef
+                                      : undefined
+                                  }
+                                  type="button"
+                                  className={`note-color-choice${
+                                    color.id === 'transparent'
+                                      ? ' is-no-fill'
+                                      : ''
+                                  }`}
+                                  role="radio"
+                                  aria-label={color.label}
+                                  aria-checked={item.color === color.id}
+                                  tabIndex={item.color === color.id ? 0 : -1}
+                                  title={color.label}
+                                  style={
+                                    {
+                                      '--note-swatch-color': color.value,
+                                    } as CSSProperties
+                                  }
+                                  onClick={() =>
+                                    changeStickyNoteColor(item.id, color.id)
+                                  }
+                                  onKeyDown={(event) => {
+                                    if (
+                                      event.key === 'Enter' ||
+                                      event.key === ' '
+                                    ) {
+                                      event.preventDefault();
+                                      changeStickyNoteColor(item.id, color.id);
+                                      return;
+                                    }
+                                    moveColorChoiceFocus(event);
+                                  }}
+                                >
+                                  <span aria-hidden="true" />
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="note-color-trigger"
+                              aria-label="Change sticky note color"
+                              aria-expanded={false}
+                              title="Change color"
+                              onKeyDown={(event) => {
+                                if (
+                                  event.key !== 'Enter' &&
+                                  event.key !== ' '
+                                ) {
+                                  return;
+                                }
+                                event.preventDefault();
+                                focusColorPickerOnOpenRef.current = true;
+                                setOpenColorPickerId(item.id);
+                              }}
+                              onClick={(event) => {
+                                focusColorPickerOnOpenRef.current =
+                                  event.detail === 0;
+                                setOpenColorPickerId(item.id);
+                              }}
+                            >
+                              <span
+                                className={
+                                  item.color === 'transparent'
+                                    ? 'is-no-fill'
+                                    : undefined
+                                }
+                                style={{
+                                  backgroundColor: getStickyNoteColorValue(
+                                    item.color,
+                                  ),
+                                }}
+                                aria-hidden="true"
+                              />
+                            </button>
+                          )}
+                        </div>
+                      ) : null}
+
                       <div
                         className="item-menu-anchor"
-                        data-item-menu={image.id}
+                        data-item-menu={item.id}
                         onPointerDown={(event) => event.stopPropagation()}
+                        onDoubleClick={(event) => event.stopPropagation()}
                       >
                         <button
                           type="button"
                           className="item-menu-button"
-                          aria-label="Image options"
+                          aria-label={`${itemLabel} options`}
                           aria-expanded={isMenuOpen}
                           aria-haspopup="menu"
                           onClick={() =>
-                            setOpenMenuId((current) =>
-                              current === image.id ? null : image.id,
+                            setOpenItemMenuId((current) =>
+                              current === item.id ? null : item.id,
                             )
                           }
                         >
@@ -1224,7 +1614,7 @@ export default function BoardApp() {
                             <button
                               type="button"
                               role="menuitem"
-                              onClick={() => rotateImage(image.id, -15)}
+                              onClick={() => rotateItem(item.id, -15)}
                             >
                               <RotateCcw aria-hidden="true" />
                               Rotate left
@@ -1232,7 +1622,7 @@ export default function BoardApp() {
                             <button
                               type="button"
                               role="menuitem"
-                              onClick={() => rotateImage(image.id, 15)}
+                              onClick={() => rotateItem(item.id, 15)}
                             >
                               <RotateCw aria-hidden="true" />
                               Rotate right
@@ -1241,11 +1631,11 @@ export default function BoardApp() {
                             <button
                               type="button"
                               role="menuitem"
-                              className="delete-image-action"
-                              onClick={() => deleteImage(image.id)}
+                              className="delete-item-action"
+                              onClick={() => deleteItem(item.id)}
                             >
                               <Trash2 aria-hidden="true" />
-                              Delete image
+                              Delete {itemLabel}
                             </button>
                           </div>
                         ) : null}
@@ -1270,12 +1660,12 @@ export default function BoardApp() {
         aria-label="Board tools"
         inert={isSlideOverviewOpen}
       >
-        {tools.map((tool, index) => (
+        {tools.map((tool) => (
           <ToolButton
-            key={tool.label}
+            key={tool.id}
             tool={tool}
-            selected={selectedTool === index}
-            onSelect={() => setSelectedTool(index)}
+            selected={selectedToolId === tool.id}
+            onSelect={() => selectTool(tool)}
           />
         ))}
       </nav>

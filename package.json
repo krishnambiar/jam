@@ -10,6 +10,7 @@
     "dev:api": "python3 -m uvicorn untitled_jam.main:app --app-dir server/src --reload --host 127.0.0.1 --port 8000 --loop asyncio",
     "dev:web": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:site": "tsc --noEmit && vite build --config vite.sites.config.ts",
     "start": "python3 -m uvicorn untitled_jam.main:app --app-dir server/src --host 0.0.0.0 --port 8000 --loop asyncio",
     "lint": "eslint .",
     "test": "python3 -m pytest"
@@ -21,7 +22,9 @@
     "react-dom": "19.2.6"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.54.5",
     "@eslint/js": "^9.39.4",
+    "@openai/sites-vite-plugin": "^0.2.0",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
@@ -35,7 +38,8 @@
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.48.1",
-    "vite": "8.2.2"
+    "vite": "8.2.2",
+    "wrangler": "^4.129.1"
   },
   "type": "module"
 }

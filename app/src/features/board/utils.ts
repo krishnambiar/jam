@@ -2,17 +2,18 @@ import {
   BOARD_HEIGHT,
   BOARD_WIDTH,
   HISTORY_LIMIT,
-  MIN_IMAGE_SIZE,
+  MIN_ITEM_SIZE,
 } from './constants';
 import type {
   BoardRect,
-  CanvasImage,
+  CanvasItem,
+  CanvasTransform,
   Point,
   ResizeCorner,
   SlideDeck,
 } from './types';
 
-export function addToPast(past: CanvasImage[][], snapshot: CanvasImage[]) {
+export function addToPast(past: CanvasItem[][], snapshot: CanvasItem[]) {
   return [...past, snapshot].slice(-HISTORY_LIMIT);
 }
 
@@ -51,28 +52,42 @@ export function normalizeRotation(degrees: number) {
   return ((((degrees + 180) % 360) + 360) % 360) - 180;
 }
 
-export function resizedImage(
-  image: CanvasImage,
+export function rotatedItemExtents(item: CanvasTransform) {
+  const radians = (item.rotation * Math.PI) / 180;
+  return {
+    horizontal:
+      (Math.abs(Math.cos(radians)) * item.width +
+        Math.abs(Math.sin(radians)) * item.height) /
+      2,
+    vertical:
+      (Math.abs(Math.sin(radians)) * item.width +
+        Math.abs(Math.cos(radians)) * item.height) /
+      2,
+  };
+}
+
+export function resizedItem<T extends CanvasTransform>(
+  item: T,
   corner: ResizeCorner,
   pointer: Point,
-): CanvasImage {
+): T {
   const horizontalSign = corner.endsWith('e') ? 1 : -1;
   const verticalSign = corner.startsWith('s') ? 1 : -1;
-  const aspectRatio = image.width / image.height;
+  const aspectRatio = item.width / item.height;
   const fixedOffset = rotateVector(
     {
-      x: (-horizontalSign * image.width) / 2,
-      y: (-verticalSign * image.height) / 2,
+      x: (-horizontalSign * item.width) / 2,
+      y: (-verticalSign * item.height) / 2,
     },
-    image.rotation,
+    item.rotation,
   );
   const fixedCorner = {
-    x: image.x + fixedOffset.x,
-    y: image.y + fixedOffset.y,
+    x: item.x + fixedOffset.x,
+    y: item.y + fixedOffset.y,
   };
   const pointerFromFixed = rotateVector(
     { x: pointer.x - fixedCorner.x, y: pointer.y - fixedCorner.y },
-    -image.rotation,
+    -item.rotation,
   );
   const diagonal = {
     x: horizontalSign * aspectRatio,
@@ -81,7 +96,7 @@ export function resizedImage(
   const projectedHeight =
     (pointerFromFixed.x * diagonal.x + pointerFromFixed.y * diagonal.y) /
     (diagonal.x * diagonal.x + diagonal.y * diagonal.y);
-  const minimumHeight = Math.max(MIN_IMAGE_SIZE, MIN_IMAGE_SIZE / aspectRatio);
+  const minimumHeight = Math.max(MIN_ITEM_SIZE, MIN_ITEM_SIZE / aspectRatio);
   const nextHeight = clamp(projectedHeight, minimumHeight, BOARD_HEIGHT * 2);
   const nextWidth = nextHeight * aspectRatio;
   const draggedOffset = rotateVector(
@@ -89,7 +104,7 @@ export function resizedImage(
       x: horizontalSign * nextWidth,
       y: verticalSign * nextHeight,
     },
-    image.rotation,
+    item.rotation,
   );
   const draggedCorner = {
     x: fixedCorner.x + draggedOffset.x,
@@ -97,12 +112,38 @@ export function resizedImage(
   };
 
   return {
-    ...image,
+    ...item,
     x: (fixedCorner.x + draggedCorner.x) / 2,
     y: (fixedCorner.y + draggedCorner.y) / 2,
     width: nextWidth,
     height: nextHeight,
   };
+}
+
+export function stickyNoteFontScale(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return 19;
+
+  const characterCount = Array.from(trimmed).length;
+  const longestLine = Math.max(
+    1,
+    ...trimmed.split(/\r?\n/).map((line) => Array.from(line).length),
+  );
+  const contentScale =
+    characterCount <= 3
+      ? 48
+      : characterCount <= 12
+        ? 20
+        : characterCount <= 26
+          ? 16
+          : characterCount <= 45
+            ? 13
+            : characterCount <= 75
+              ? 10.5
+              : 8.5;
+  const lineFitScale = 90 / (longestLine * 0.56);
+
+  return Math.max(8.5, Math.min(contentScale, lineFitScale));
 }
 
 export function fittedImageSize(naturalWidth: number, naturalHeight: number) {
