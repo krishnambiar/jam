@@ -72,6 +72,12 @@ type SlideDeck = {
   activeSlideId: string;
 };
 
+type DeckHistoryState = {
+  past: SlideDeck[];
+  present: SlideDeck;
+  future: SlideDeck[];
+};
+
 type BoardRect = {
   left: number;
   top: number;
@@ -182,6 +188,10 @@ function SlidePreview({ images }: { images: CanvasImage[] }) {
 }
 
 function addToPast(past: CanvasImage[][], snapshot: CanvasImage[]) {
+  return [...past, snapshot].slice(-HISTORY_LIMIT);
+}
+
+function addDeckToPast(past: SlideDeck[], snapshot: SlideDeck) {
   return [...past, snapshot].slice(-HISTORY_LIMIT);
 }
 
@@ -331,10 +341,15 @@ function decodeImageFile(file: File) {
 
 export default function Home() {
   const [selectedTool, setSelectedTool] = useState(2);
-  const [deck, setDeck] = useState<SlideDeck>(() => ({
-    slides: [createEmptySlide(INITIAL_SLIDE_ID)],
-    activeSlideId: INITIAL_SLIDE_ID,
+  const [deckHistory, setDeckHistory] = useState<DeckHistoryState>(() => ({
+    past: [],
+    present: {
+      slides: [createEmptySlide(INITIAL_SLIDE_ID)],
+      activeSlideId: INITIAL_SLIDE_ID,
+    },
+    future: [],
   }));
+  const deck = deckHistory.present;
   const [isSlideOverviewOpen, setIsSlideOverviewOpen] = useState(false);
   const [overviewScrollAvailability, setOverviewScrollAvailability] = useState({
     left: false,
@@ -342,23 +357,42 @@ export default function Home() {
   });
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [openSlideMenuId, setOpenSlideMenuId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const boardRef = useRef<HTMLDivElement>(null);
   const overviewViewportRef = useRef<HTMLDivElement>(null);
   const activeThumbnailRef = useRef<HTMLButtonElement>(null);
+  const slideMenuButtonRef = useRef<HTMLButtonElement>(null);
   const frameCounterRef = useRef<HTMLButtonElement>(null);
   const gestureRef = useRef<Gesture | null>(null);
   const activeSlideIdRef = useRef(deck.activeSlideId);
   const wasSlideOverviewOpenRef = useRef(false);
   const overviewReturnFocusRef = useRef<'counter' | 'canvas'>('counter');
 
+  const closeSlideMenu = useCallback((restoreFocus = false) => {
+    setOpenSlideMenuId(null);
+    if (!restoreFocus) return;
+
+    window.requestAnimationFrame(() => {
+      slideMenuButtonRef.current?.focus({ preventScroll: true });
+    });
+  }, []);
+
   const closeSlideOverview = useCallback(
     (returnFocus: 'counter' | 'canvas' = 'counter') => {
       overviewReturnFocusRef.current = returnFocus;
+      closeSlideMenu();
       setIsSlideOverviewOpen(false);
     },
-    [],
+    [closeSlideMenu],
   );
+
+  const setDeck = useCallback((update: (deck: SlideDeck) => SlideDeck) => {
+    setDeckHistory((current) => {
+      const present = update(current.present);
+      return present === current.present ? current : { ...current, present };
+    });
+  }, []);
 
   useLayoutEffect(() => {
     activeSlideIdRef.current = deck.activeSlideId;
@@ -373,17 +407,23 @@ export default function Home() {
 
   const updateActiveHistory = useCallback(
     (update: (history: HistoryState) => HistoryState) => {
-      setDeck((current) => {
+      setDeckHistory((current) => {
         let changed = false;
-        const slides = current.slides.map((slide) => {
-          if (slide.id !== current.activeSlideId) return slide;
+        const slides = current.present.slides.map((slide) => {
+          if (slide.id !== current.present.activeSlideId) return slide;
           const nextHistory = update(slide.history);
           if (nextHistory === slide.history) return slide;
           changed = true;
           return { ...slide, history: nextHistory };
         });
 
-        return changed ? { ...current, slides } : current;
+        if (!changed) return current;
+
+        return {
+          past: addDeckToPast(current.past, current.present),
+          present: { ...current.present, slides },
+          future: [],
+        };
       });
     },
     [],
@@ -410,7 +450,7 @@ export default function Home() {
           : slide,
       ),
     }));
-  }, []);
+  }, [setDeck]);
 
   const commit = useCallback(
     (update: (images: CanvasImage[]) => CanvasImage[]) => {
@@ -432,8 +472,9 @@ export default function Home() {
   const undo = useCallback(() => {
     cancelActiveGesture();
     setOpenMenuId(null);
+    closeSlideMenu(openSlideMenuId !== null);
     setSelectedImageId(null);
-    updateActiveHistory((current) => {
+    setDeckHistory((current) => {
       const previous = current.past.at(-1);
       if (!previous) return current;
 
@@ -443,23 +484,56 @@ export default function Home() {
         future: [current.present, ...current.future].slice(0, HISTORY_LIMIT),
       };
     });
-  }, [cancelActiveGesture, updateActiveHistory]);
+  }, [cancelActiveGesture, closeSlideMenu, openSlideMenuId]);
 
   const redo = useCallback(() => {
     cancelActiveGesture();
     setOpenMenuId(null);
+    closeSlideMenu(openSlideMenuId !== null);
     setSelectedImageId(null);
-    updateActiveHistory((current) => {
+    setDeckHistory((current) => {
       const next = current.future[0];
       if (!next) return current;
 
       return {
-        past: addToPast(current.past, current.present),
+        past: addDeckToPast(current.past, current.present),
         present: next,
         future: current.future.slice(1),
       };
     });
-  }, [cancelActiveGesture, updateActiveHistory]);
+  }, [cancelActiveGesture, closeSlideMenu, openSlideMenuId]);
+
+  const deleteSlide = useCallback(
+    (slideId: string) => {
+      cancelActiveGesture();
+      setSelectedImageId(null);
+      setOpenMenuId(null);
+      closeSlideMenu();
+      setDeckHistory((current) => {
+        if (current.present.slides.length <= 1) return current;
+
+        const deletedIndex = current.present.slides.findIndex(
+          (slide) => slide.id === slideId,
+        );
+        if (deletedIndex < 0) return current;
+
+        const slides = current.present.slides.filter(
+          (slide) => slide.id !== slideId,
+        );
+        const activeSlideId =
+          current.present.activeSlideId === slideId
+            ? slides[Math.min(deletedIndex, slides.length - 1)].id
+            : current.present.activeSlideId;
+
+        return {
+          past: addDeckToPast(current.past, current.present),
+          present: { slides, activeSlideId },
+          future: [],
+        };
+      });
+    },
+    [cancelActiveGesture, closeSlideMenu],
+  );
 
   const deleteImage = useCallback(
     (imageId: string) => {
@@ -528,48 +602,66 @@ export default function Home() {
             }
           : null;
 
-      setDeck((current) => {
-        let changed = false;
-        const slides = current.slides.map((slide) => {
-          if (slide.id !== targetSlideId) return slide;
-          changed = true;
-          const positioned = additions.map((image, index) => {
-            const offset = ((slide.history.present.length + index) % 5) * 22;
-            return {
-              ...image,
-              x: clamp(
-                image.x + offset,
-                image.width / 2,
-                BOARD_WIDTH - image.width / 2,
-              ),
-              y: clamp(
-                image.y + offset,
-                image.height / 2,
-                BOARD_HEIGHT - image.height / 2,
-              ),
-            };
-          });
+      setDeckHistory((current) => {
+        const targetSlide = current.present.slides.find(
+          (slide) => slide.id === targetSlideId,
+        );
+        if (!targetSlide) return current;
 
+        const beforeImages = concurrentGesture
+          ? targetSlide.history.present.map((currentImage) =>
+              currentImage.id === concurrentGesture.imageId
+                ? concurrentGesture.initialImage
+                : currentImage,
+            )
+          : targetSlide.history.present;
+        const positioned = additions.map((image, index) => {
+          const offset = ((targetSlide.history.present.length + index) % 5) * 22;
           return {
-            ...slide,
-            history: {
-              past: addToPast(
-                slide.history.past,
-                concurrentGesture
-                  ? slide.history.present.map((currentImage) =>
-                      currentImage.id === concurrentGesture.imageId
-                        ? concurrentGesture.initialImage
-                        : currentImage,
-                    )
-                  : slide.history.present,
-              ),
-              present: [...slide.history.present, ...positioned],
-              future: [],
-            },
+            ...image,
+            x: clamp(
+              image.x + offset,
+              image.width / 2,
+              BOARD_WIDTH - image.width / 2,
+            ),
+            y: clamp(
+              image.y + offset,
+              image.height / 2,
+              BOARD_HEIGHT - image.height / 2,
+            ),
           };
         });
+        const beforeDeck = concurrentGesture
+          ? {
+              ...current.present,
+              slides: current.present.slides.map((slide) =>
+                slide.id === targetSlideId
+                  ? {
+                      ...slide,
+                      history: { ...slide.history, present: beforeImages },
+                    }
+                  : slide,
+              ),
+            }
+          : current.present;
+        const slides = current.present.slides.map((slide) =>
+          slide.id === targetSlideId
+            ? {
+                ...slide,
+                history: {
+                  past: addToPast(slide.history.past, beforeImages),
+                  present: [...slide.history.present, ...positioned],
+                  future: [],
+                },
+              }
+            : slide,
+        );
 
-        return changed ? { ...current, slides } : current;
+        return {
+          past: addDeckToPast(current.past, beforeDeck),
+          present: { ...current.present, slides },
+          future: [],
+        };
       });
       if (activeSlideIdRef.current === targetSlideId) {
         setSelectedImageId(
@@ -613,13 +705,17 @@ export default function Home() {
       if (isTextEntry(event.target)) return;
 
       if (event.key === 'Escape') {
+        if (openSlideMenuId) {
+          event.preventDefault();
+          closeSlideMenu(true);
+          return;
+        }
+
         closeSlideOverview('counter');
         setOpenMenuId(null);
         setSelectedImageId(null);
         return;
       }
-
-      if (isSlideOverviewOpen) return;
 
       const key = event.key.toLowerCase();
       const commandKey = event.ctrlKey || event.metaKey;
@@ -637,6 +733,17 @@ export default function Home() {
         return;
       }
 
+      if (
+        isSlideOverviewOpen &&
+        (event.key === 'Delete' || event.key === 'Backspace')
+      ) {
+        event.preventDefault();
+        deleteSlide(deck.activeSlideId);
+        return;
+      }
+
+      if (isSlideOverviewOpen) return;
+
       if ((event.key === 'Delete' || event.key === 'Backspace') && selectedImageId) {
         event.preventDefault();
         deleteImage(selectedImageId);
@@ -649,8 +756,12 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     closeSlideOverview,
+    closeSlideMenu,
+    deck.activeSlideId,
     deleteImage,
+    deleteSlide,
     isSlideOverviewOpen,
+    openSlideMenuId,
     redo,
     selectedImageId,
     undo,
@@ -674,6 +785,20 @@ export default function Home() {
     document.addEventListener('pointerdown', closeMenu, true);
     return () => document.removeEventListener('pointerdown', closeMenu, true);
   }, [openMenuId]);
+
+  useEffect(() => {
+    if (!openSlideMenuId) return;
+
+    const closeMenu = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return;
+      const menu = event.target.closest('[data-slide-menu]');
+      if (menu?.getAttribute('data-slide-menu') === openSlideMenuId) return;
+      closeSlideMenu();
+    };
+
+    document.addEventListener('pointerdown', closeMenu, true);
+    return () => document.removeEventListener('pointerdown', closeMenu, true);
+  }, [closeSlideMenu, openSlideMenuId]);
 
   const startGesture = (
     event: ReactPointerEvent<HTMLElement>,
@@ -790,32 +915,49 @@ export default function Home() {
     gestureRef.current = null;
     if (!gesture.moved) return;
 
-    setDeck((current) => {
-      if (current.activeSlideId !== gesture.slideId) return current;
+    setDeckHistory((current) => {
+      if (current.present.activeSlideId !== gesture.slideId) return current;
 
-      return {
-        ...current,
-        slides: current.slides.map((slide) =>
+      const targetSlide = current.present.slides.find(
+        (slide) => slide.id === gesture.slideId,
+      );
+      if (!targetSlide) return current;
+
+      const beforeImages = targetSlide.history.present.map((image) =>
+        image.id === gesture.imageId ? gesture.initialImage : image,
+      );
+      const beforeDeck = {
+        ...current.present,
+        slides: current.present.slides.map((slide) =>
           slide.id === gesture.slideId
             ? {
                 ...slide,
-                history: {
-                  past: addToPast(
-                    slide.history.past,
-                    slide.history.present.map((image) =>
-                      image.id === gesture.imageId ? gesture.initialImage : image,
-                    ),
-                  ),
-                  present: slide.history.present.map((image) =>
-                    image.id === gesture.imageId
-                      ? { ...image, rotation: normalizeRotation(image.rotation) }
-                      : image,
-                  ),
-                  future: [],
-                },
+                history: { ...slide.history, present: beforeImages },
               }
             : slide,
         ),
+      };
+      const slides = current.present.slides.map((slide) =>
+        slide.id === gesture.slideId
+          ? {
+              ...slide,
+              history: {
+                past: addToPast(slide.history.past, beforeImages),
+                present: slide.history.present.map((image) =>
+                  image.id === gesture.imageId
+                    ? { ...image, rotation: normalizeRotation(image.rotation) }
+                    : image,
+                ),
+                future: [],
+              },
+            }
+          : slide,
+      );
+
+      return {
+        past: addDeckToPast(current.past, beforeDeck),
+        present: { ...current.present, slides },
+        future: [],
       };
     });
   };
@@ -824,7 +966,8 @@ export default function Home() {
     cancelActiveGesture();
     setSelectedImageId(null);
     setOpenMenuId(null);
-  }, [cancelActiveGesture]);
+    closeSlideMenu();
+  }, [cancelActiveGesture, closeSlideMenu]);
 
   const selectSlide = useCallback(
     (slideId: string) => {
@@ -835,7 +978,7 @@ export default function Home() {
           : current,
       );
     },
-    [clearCanvasSelection],
+    [clearCanvasSelection, setDeck],
   );
 
   const goToPreviousSlide = useCallback(() => {
@@ -850,25 +993,34 @@ export default function Home() {
         activeSlideId: current.slides[currentIndex - 1].id,
       };
     });
-  }, [clearCanvasSelection]);
+  }, [clearCanvasSelection, setDeck]);
 
   const goToNextSlide = useCallback(() => {
     const newSlideId = crypto.randomUUID();
     clearCanvasSelection();
-    setDeck((current) => {
-      const currentIndex = current.slides.findIndex(
-        (slide) => slide.id === current.activeSlideId,
+    setDeckHistory((current) => {
+      const currentIndex = current.present.slides.findIndex(
+        (slide) => slide.id === current.present.activeSlideId,
       );
-      const nextSlide = current.slides[currentIndex + 1];
+      const nextSlide = current.present.slides[currentIndex + 1];
 
       if (nextSlide) {
-        return { ...current, activeSlideId: nextSlide.id };
+        return {
+          ...current,
+          present: { ...current.present, activeSlideId: nextSlide.id },
+        };
       }
-      if (current.slides.length >= MAX_SLIDES) return current;
+      if (current.present.slides.length >= MAX_SLIDES) return current;
+
+      const present = {
+        slides: [...current.present.slides, createEmptySlide(newSlideId)],
+        activeSlideId: newSlideId,
+      };
 
       return {
-        slides: [...current.slides, createEmptySlide(newSlideId)],
-        activeSlideId: newSlideId,
+        past: addDeckToPast(current.past, current.present),
+        present,
+        future: [],
       };
     });
   }, [clearCanvasSelection]);
@@ -877,18 +1029,26 @@ export default function Home() {
     (slideId: string) => {
       const newSlideId = crypto.randomUUID();
       clearCanvasSelection();
-      setDeck((current) => {
-        if (current.slides.length >= MAX_SLIDES) return current;
-        const index = current.slides.findIndex((slide) => slide.id === slideId);
+      setDeckHistory((current) => {
+        if (current.present.slides.length >= MAX_SLIDES) return current;
+        const index = current.present.slides.findIndex(
+          (slide) => slide.id === slideId,
+        );
         if (index < 0) return current;
 
-        return {
+        const present = {
           slides: [
-            ...current.slides.slice(0, index + 1),
+            ...current.present.slides.slice(0, index + 1),
             createEmptySlide(newSlideId),
-            ...current.slides.slice(index + 1),
+            ...current.present.slides.slice(index + 1),
           ],
           activeSlideId: newSlideId,
+        };
+
+        return {
+          past: addDeckToPast(current.past, current.present),
+          present,
+          future: [],
         };
       });
     },
@@ -997,7 +1157,7 @@ export default function Home() {
             }}
           >
             <span>
-              {activeSlideIndex + 1}/{MAX_SLIDES}
+              {activeSlideIndex + 1}/{deck.slides.length}
             </span>
           </button>
           <button
@@ -1080,9 +1240,58 @@ export default function Home() {
                           <SlidePreview images={slide.history.present} />
                         </button>
                         {isActive ? (
-                          <span className="slide-options" aria-hidden="true">
-                            <MoreVertical />
-                          </span>
+                          <div
+                            className="slide-options"
+                            data-slide-menu={slide.id}
+                            onBlur={(event) => {
+                              if (
+                                event.relatedTarget instanceof Node &&
+                                event.currentTarget.contains(event.relatedTarget)
+                              ) {
+                                return;
+                              }
+                              closeSlideMenu();
+                            }}
+                          >
+                            <button
+                              ref={slideMenuButtonRef}
+                              type="button"
+                              className="slide-options-button"
+                              aria-label={`Canvas ${index + 1} options`}
+                              aria-expanded={openSlideMenuId === slide.id}
+                              aria-controls={
+                                openSlideMenuId === slide.id
+                                  ? `slide-menu-${slide.id}`
+                                  : undefined
+                              }
+                              onClick={() =>
+                                setOpenSlideMenuId((current) =>
+                                  current === slide.id ? null : slide.id,
+                                )
+                              }
+                            >
+                              <MoreVertical aria-hidden="true" />
+                            </button>
+
+                            {openSlideMenuId === slide.id ? (
+                              <div
+                                id={`slide-menu-${slide.id}`}
+                                className="slide-menu-popover"
+                                role="group"
+                                aria-label={`Canvas ${index + 1} actions`}
+                              >
+                                <button
+                                  type="button"
+                                  className="delete-slide-action"
+                                  disabled={deck.slides.length <= 1}
+                                  onClick={() => deleteSlide(slide.id)}
+                                >
+                                  <Trash2 aria-hidden="true" />
+                                  <span>Delete canvas</span>
+                                </button>
+                              </div>
+                            ) : null}
+                          </div>
                         ) : null}
                       </div>
                     </div>
@@ -1135,7 +1344,7 @@ export default function Home() {
             type="button"
             aria-label="Undo"
             title="Undo (Ctrl+Z)"
-            disabled={history.past.length === 0}
+            disabled={deckHistory.past.length === 0}
             onClick={undo}
           >
             <Undo2 aria-hidden="true" />
@@ -1144,7 +1353,7 @@ export default function Home() {
             type="button"
             aria-label="Redo"
             title="Redo (Ctrl+Shift+Z)"
-            disabled={history.future.length === 0}
+            disabled={deckHistory.future.length === 0}
             onClick={redo}
           >
             <Redo2 aria-hidden="true" />
