@@ -5,11 +5,13 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Circle,
   Eraser,
   MoreVertical,
   MousePointer2,
   Pen,
+  Plus,
   Redo2,
   RotateCcw,
   RotateCw,
@@ -23,6 +25,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -33,6 +36,8 @@ const BOARD_WIDTH = 1600;
 const BOARD_HEIGHT = 900;
 const MIN_IMAGE_SIZE = 56;
 const HISTORY_LIMIT = 100;
+const MAX_SLIDES = 20;
+const INITIAL_SLIDE_ID = 'slide-1';
 
 type Tool = {
   label: string;
@@ -57,6 +62,16 @@ type HistoryState = {
   future: CanvasImage[][];
 };
 
+type Slide = {
+  id: string;
+  history: HistoryState;
+};
+
+type SlideDeck = {
+  slides: Slide[];
+  activeSlideId: string;
+};
+
 type BoardRect = {
   left: number;
   top: number;
@@ -70,8 +85,8 @@ type ResizeCorner = 'nw' | 'ne' | 'sw' | 'se';
 type Gesture = {
   kind: 'move' | 'resize' | 'rotate';
   pointerId: number;
+  slideId: string;
   imageId: string;
-  before: CanvasImage[];
   initialImage: CanvasImage;
   boardRect: BoardRect;
   startPoint: Point;
@@ -91,6 +106,23 @@ const tools: Tool[] = [
 ];
 
 const resizeCorners: ResizeCorner[] = ['nw', 'ne', 'sw', 'se'];
+
+const EMPTY_HISTORY: HistoryState = {
+  past: [],
+  present: [],
+  future: [],
+};
+
+function createEmptySlide(id: string): Slide {
+  return {
+    id,
+    history: {
+      past: [],
+      present: [],
+      future: [],
+    },
+  };
+}
 
 function ToolButton({
   tool,
@@ -122,6 +154,30 @@ function ToolButton({
         <ChevronRight className="tool-menu-mark" aria-hidden="true" />
       ) : null}
     </button>
+  );
+}
+
+function SlidePreview({ images }: { images: CanvasImage[] }) {
+  return (
+    <span className="slide-preview-canvas" aria-hidden="true">
+      {images.map((image) => (
+        <span
+          key={image.id}
+          className="slide-preview-item"
+          style={{
+            left: `${(image.x / BOARD_WIDTH) * 100}%`,
+            top: `${(image.y / BOARD_HEIGHT) * 100}%`,
+            width: `${(image.width / BOARD_WIDTH) * 100}%`,
+            height: `${(image.height / BOARD_HEIGHT) * 100}%`,
+            transform: `translate(-50%, -50%) rotate(${image.rotation}deg)`,
+          }}
+        >
+          {/* Clipboard images use local data URLs and cannot use an image optimizer. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={image.src} alt="" draggable={false} />
+        </span>
+      ))}
+    </span>
   );
 }
 
@@ -275,20 +331,82 @@ function decodeImageFile(file: File) {
 
 export default function Home() {
   const [selectedTool, setSelectedTool] = useState(2);
-  const [history, setHistory] = useState<HistoryState>({
-    past: [],
-    present: [],
-    future: [],
+  const [deck, setDeck] = useState<SlideDeck>(() => ({
+    slides: [createEmptySlide(INITIAL_SLIDE_ID)],
+    activeSlideId: INITIAL_SLIDE_ID,
+  }));
+  const [isSlideOverviewOpen, setIsSlideOverviewOpen] = useState(false);
+  const [overviewScrollAvailability, setOverviewScrollAvailability] = useState({
+    left: false,
+    right: false,
   });
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const boardRef = useRef<HTMLDivElement>(null);
+  const overviewViewportRef = useRef<HTMLDivElement>(null);
+  const activeThumbnailRef = useRef<HTMLButtonElement>(null);
+  const frameCounterRef = useRef<HTMLButtonElement>(null);
   const gestureRef = useRef<Gesture | null>(null);
+  const activeSlideIdRef = useRef(deck.activeSlideId);
+  const wasSlideOverviewOpenRef = useRef(false);
+
+  useLayoutEffect(() => {
+    activeSlideIdRef.current = deck.activeSlideId;
+  }, [deck.activeSlideId]);
+
+  const activeSlideIndex = Math.max(
+    0,
+    deck.slides.findIndex((slide) => slide.id === deck.activeSlideId),
+  );
+  const activeSlide = deck.slides[activeSlideIndex];
+  const history = activeSlide?.history ?? EMPTY_HISTORY;
+
+  const updateActiveHistory = useCallback(
+    (update: (history: HistoryState) => HistoryState) => {
+      setDeck((current) => {
+        let changed = false;
+        const slides = current.slides.map((slide) => {
+          if (slide.id !== current.activeSlideId) return slide;
+          const nextHistory = update(slide.history);
+          if (nextHistory === slide.history) return slide;
+          changed = true;
+          return { ...slide, history: nextHistory };
+        });
+
+        return changed ? { ...current, slides } : current;
+      });
+    },
+    [],
+  );
+
+  const cancelActiveGesture = useCallback(() => {
+    const gesture = gestureRef.current;
+    gestureRef.current = null;
+    if (!gesture?.moved) return;
+
+    setDeck((current) => ({
+      ...current,
+      slides: current.slides.map((slide) =>
+        slide.id === gesture.slideId
+          ? {
+              ...slide,
+              history: {
+                ...slide.history,
+                present: slide.history.present.map((image) =>
+                  image.id === gesture.imageId ? gesture.initialImage : image,
+                ),
+              },
+            }
+          : slide,
+      ),
+    }));
+  }, []);
 
   const commit = useCallback(
     (update: (images: CanvasImage[]) => CanvasImage[]) => {
-      setHistory((current) => {
+      cancelActiveGesture();
+      updateActiveHistory((current) => {
         const next = update(current.present);
         if (next === current.present) return current;
 
@@ -299,13 +417,14 @@ export default function Home() {
         };
       });
     },
-    [],
+    [cancelActiveGesture, updateActiveHistory],
   );
 
   const undo = useCallback(() => {
+    cancelActiveGesture();
     setOpenMenuId(null);
     setSelectedImageId(null);
-    setHistory((current) => {
+    updateActiveHistory((current) => {
       const previous = current.past.at(-1);
       if (!previous) return current;
 
@@ -315,12 +434,13 @@ export default function Home() {
         future: [current.present, ...current.future].slice(0, HISTORY_LIMIT),
       };
     });
-  }, []);
+  }, [cancelActiveGesture, updateActiveHistory]);
 
   const redo = useCallback(() => {
+    cancelActiveGesture();
     setOpenMenuId(null);
     setSelectedImageId(null);
-    setHistory((current) => {
+    updateActiveHistory((current) => {
       const next = current.future[0];
       if (!next) return current;
 
@@ -330,7 +450,7 @@ export default function Home() {
         future: current.future.slice(1),
       };
     });
-  }, []);
+  }, [cancelActiveGesture, updateActiveHistory]);
 
   const deleteImage = useCallback(
     (imageId: string) => {
@@ -358,55 +478,104 @@ export default function Home() {
     [commit],
   );
 
-  const pasteImages = useCallback(async (files: File[]) => {
-    const results = await Promise.allSettled(files.map(decodeImageFile));
-    const decoded = results.flatMap((result) =>
-      result.status === 'fulfilled' ? [result.value] : [],
-    );
+  const pasteImages = useCallback(
+    async (files: File[]) => {
+      const targetSlideId = activeSlideIdRef.current;
+      cancelActiveGesture();
+      setSelectedImageId(null);
+      setOpenMenuId(null);
+      const results = await Promise.allSettled(files.map(decodeImageFile));
+      const decoded = results.flatMap((result) =>
+        result.status === 'fulfilled' ? [result.value] : [],
+      );
 
-    if (decoded.length === 0) {
-      setNotice('That image format is not supported by this browser.');
-      return;
-    }
+      if (decoded.length === 0) {
+        if (activeSlideIdRef.current === targetSlideId) {
+          setNotice('That image format is not supported by this browser.');
+        }
+        return;
+      }
 
-    const additions = decoded.map((image) => {
-      const size = fittedImageSize(image.naturalWidth, image.naturalHeight);
-      return {
-        id: crypto.randomUUID(),
-        src: image.src,
-        name: image.name,
-        x: BOARD_WIDTH / 2,
-        y: BOARD_HEIGHT / 2,
-        width: size.width,
-        height: size.height,
-        rotation: 0,
-      } satisfies CanvasImage;
-    });
-
-    setHistory((current) => {
-      const positioned = additions.map((image, index) => {
-        const offset = ((current.present.length + index) % 5) * 22;
+      const additions = decoded.map((image) => {
+        const size = fittedImageSize(image.naturalWidth, image.naturalHeight);
         return {
-          ...image,
-          x: clamp(image.x + offset, image.width / 2, BOARD_WIDTH - image.width / 2),
-          y: clamp(image.y + offset, image.height / 2, BOARD_HEIGHT - image.height / 2),
-        };
+          id: crypto.randomUUID(),
+          src: image.src,
+          name: image.name,
+          x: BOARD_WIDTH / 2,
+          y: BOARD_HEIGHT / 2,
+          width: size.width,
+          height: size.height,
+          rotation: 0,
+        } satisfies CanvasImage;
       });
 
-      return {
-        past: addToPast(current.past, current.present),
-        present: [...current.present, ...positioned],
-        future: [],
-      };
-    });
-    setSelectedImageId(additions.at(-1)?.id ?? null);
-    setOpenMenuId(null);
-    setNotice(
-      additions.length === 1
-        ? 'Image pasted. Drag to move it and use the blue corners to resize.'
-        : `${additions.length} images pasted.`,
-    );
-  }, []);
+      const gestureAtCompletion = gestureRef.current;
+      const concurrentGesture =
+        gestureAtCompletion?.slideId === targetSlideId
+          ? {
+              imageId: gestureAtCompletion.imageId,
+              initialImage: gestureAtCompletion.initialImage,
+            }
+          : null;
+
+      setDeck((current) => {
+        let changed = false;
+        const slides = current.slides.map((slide) => {
+          if (slide.id !== targetSlideId) return slide;
+          changed = true;
+          const positioned = additions.map((image, index) => {
+            const offset = ((slide.history.present.length + index) % 5) * 22;
+            return {
+              ...image,
+              x: clamp(
+                image.x + offset,
+                image.width / 2,
+                BOARD_WIDTH - image.width / 2,
+              ),
+              y: clamp(
+                image.y + offset,
+                image.height / 2,
+                BOARD_HEIGHT - image.height / 2,
+              ),
+            };
+          });
+
+          return {
+            ...slide,
+            history: {
+              past: addToPast(
+                slide.history.past,
+                concurrentGesture
+                  ? slide.history.present.map((currentImage) =>
+                      currentImage.id === concurrentGesture.imageId
+                        ? concurrentGesture.initialImage
+                        : currentImage,
+                    )
+                  : slide.history.present,
+              ),
+              present: [...slide.history.present, ...positioned],
+              future: [],
+            },
+          };
+        });
+
+        return changed ? { ...current, slides } : current;
+      });
+      if (activeSlideIdRef.current === targetSlideId) {
+        setSelectedImageId(
+          concurrentGesture?.imageId ?? additions.at(-1)?.id ?? null,
+        );
+        setOpenMenuId(null);
+        setNotice(
+          additions.length === 1
+            ? 'Image pasted. Drag to move it and use the blue corners to resize.'
+            : `${additions.length} images pasted.`,
+        );
+      }
+    },
+    [cancelActiveGesture],
+  );
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
@@ -434,6 +603,15 @@ export default function Home() {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isTextEntry(event.target)) return;
 
+      if (event.key === 'Escape') {
+        setIsSlideOverviewOpen(false);
+        setOpenMenuId(null);
+        setSelectedImageId(null);
+        return;
+      }
+
+      if (isSlideOverviewOpen) return;
+
       const key = event.key.toLowerCase();
       const commandKey = event.ctrlKey || event.metaKey;
 
@@ -456,15 +634,11 @@ export default function Home() {
         return;
       }
 
-      if (event.key === 'Escape') {
-        setOpenMenuId(null);
-        setSelectedImageId(null);
-      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [deleteImage, redo, selectedImageId, undo]);
+  }, [deleteImage, isSlideOverviewOpen, redo, selectedImageId, undo]);
 
   useEffect(() => {
     if (!notice) return;
@@ -507,8 +681,8 @@ export default function Home() {
     gestureRef.current = {
       kind,
       pointerId: event.pointerId,
+      slideId: deck.activeSlideId,
       imageId: image.id,
-      before: history.present,
       initialImage: image,
       boardRect: compactRect,
       startPoint,
@@ -571,12 +745,26 @@ export default function Home() {
 
     if (!changed) return;
     gesture.moved = true;
-    setHistory((current) => ({
-      ...current,
-      present: current.present.map((currentImage) =>
-        currentImage.id === gesture.imageId ? nextImage : currentImage,
-      ),
-    }));
+    setDeck((current) => {
+      if (current.activeSlideId !== gesture.slideId) return current;
+
+      return {
+        ...current,
+        slides: current.slides.map((slide) =>
+          slide.id === gesture.slideId
+            ? {
+                ...slide,
+                history: {
+                  ...slide.history,
+                  present: slide.history.present.map((currentImage) =>
+                    currentImage.id === gesture.imageId ? nextImage : currentImage,
+                  ),
+                },
+              }
+            : slide,
+        ),
+      };
+    });
   };
 
   const finishGesture = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -586,31 +774,218 @@ export default function Home() {
     gestureRef.current = null;
     if (!gesture.moved) return;
 
-    setHistory((current) => ({
-      past: addToPast(current.past, gesture.before),
-      present: current.present.map((image) =>
-        image.id === gesture.imageId
-          ? { ...image, rotation: normalizeRotation(image.rotation) }
-          : image,
-      ),
-      future: [],
-    }));
+    setDeck((current) => {
+      if (current.activeSlideId !== gesture.slideId) return current;
+
+      return {
+        ...current,
+        slides: current.slides.map((slide) =>
+          slide.id === gesture.slideId
+            ? {
+                ...slide,
+                history: {
+                  past: addToPast(
+                    slide.history.past,
+                    slide.history.present.map((image) =>
+                      image.id === gesture.imageId ? gesture.initialImage : image,
+                    ),
+                  ),
+                  present: slide.history.present.map((image) =>
+                    image.id === gesture.imageId
+                      ? { ...image, rotation: normalizeRotation(image.rotation) }
+                      : image,
+                  ),
+                  future: [],
+                },
+              }
+            : slide,
+        ),
+      };
+    });
   };
+
+  const clearCanvasSelection = useCallback(() => {
+    cancelActiveGesture();
+    setSelectedImageId(null);
+    setOpenMenuId(null);
+  }, [cancelActiveGesture]);
+
+  const selectSlide = useCallback(
+    (slideId: string) => {
+      clearCanvasSelection();
+      setDeck((current) =>
+        current.slides.some((slide) => slide.id === slideId)
+          ? { ...current, activeSlideId: slideId }
+          : current,
+      );
+    },
+    [clearCanvasSelection],
+  );
+
+  const goToPreviousSlide = useCallback(() => {
+    clearCanvasSelection();
+    setDeck((current) => {
+      const currentIndex = current.slides.findIndex(
+        (slide) => slide.id === current.activeSlideId,
+      );
+      if (currentIndex <= 0) return current;
+      return {
+        ...current,
+        activeSlideId: current.slides[currentIndex - 1].id,
+      };
+    });
+  }, [clearCanvasSelection]);
+
+  const goToNextSlide = useCallback(() => {
+    const newSlideId = crypto.randomUUID();
+    clearCanvasSelection();
+    setDeck((current) => {
+      const currentIndex = current.slides.findIndex(
+        (slide) => slide.id === current.activeSlideId,
+      );
+      const nextSlide = current.slides[currentIndex + 1];
+
+      if (nextSlide) {
+        return { ...current, activeSlideId: nextSlide.id };
+      }
+      if (current.slides.length >= MAX_SLIDES) return current;
+
+      return {
+        slides: [...current.slides, createEmptySlide(newSlideId)],
+        activeSlideId: newSlideId,
+      };
+    });
+  }, [clearCanvasSelection]);
+
+  const insertSlideAfter = useCallback(
+    (slideId: string) => {
+      const newSlideId = crypto.randomUUID();
+      clearCanvasSelection();
+      setDeck((current) => {
+        if (current.slides.length >= MAX_SLIDES) return current;
+        const index = current.slides.findIndex((slide) => slide.id === slideId);
+        if (index < 0) return current;
+
+        return {
+          slides: [
+            ...current.slides.slice(0, index + 1),
+            createEmptySlide(newSlideId),
+            ...current.slides.slice(index + 1),
+          ],
+          activeSlideId: newSlideId,
+        };
+      });
+    },
+    [clearCanvasSelection],
+  );
+
+  const updateOverviewScrollAvailability = useCallback(() => {
+    const viewport = overviewViewportRef.current;
+    if (!viewport) return;
+    const maximumScroll = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+    const next = {
+      left: viewport.scrollLeft > 1,
+      right: viewport.scrollLeft < maximumScroll - 1,
+    };
+    setOverviewScrollAvailability((current) =>
+      current.left === next.left && current.right === next.right ? current : next,
+    );
+  }, []);
+
+  const scrollSlideOverview = useCallback(
+    (direction: -1 | 1) => {
+      const viewport = overviewViewportRef.current;
+      if (!viewport) return;
+      viewport.scrollBy({
+        left: direction * Math.max(277, viewport.clientWidth * 0.72),
+        behavior: 'smooth',
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!isSlideOverviewOpen) {
+      if (wasSlideOverviewOpenRef.current) {
+        wasSlideOverviewOpenRef.current = false;
+        frameCounterRef.current?.focus();
+      }
+      return;
+    }
+
+    wasSlideOverviewOpenRef.current = true;
+    const animationFrame = window.requestAnimationFrame(() => {
+      activeThumbnailRef.current?.scrollIntoView({
+        block: 'nearest',
+        inline: 'nearest',
+      });
+      activeThumbnailRef.current?.focus({ preventScroll: true });
+      updateOverviewScrollAvailability();
+    });
+    window.addEventListener('resize', updateOverviewScrollAvailability);
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      window.removeEventListener('resize', updateOverviewScrollAvailability);
+    };
+  }, [
+    deck.activeSlideId,
+    deck.slides.length,
+    isSlideOverviewOpen,
+    updateOverviewScrollAvailability,
+  ]);
 
   const images = history.present;
 
   return (
     <main className="app-shell">
-      <header className="topbar">
+      <header className="topbar" inert={isSlideOverviewOpen}>
         <div className="document-title">Untitled Jam</div>
 
-        <div className="frame-navigation" aria-hidden="true">
-          <ChevronLeft className="previous-frame" />
-          <div className="frame-counter">
-            <span>1/20</span>
-          </div>
-          <ChevronRight className="next-frame" />
-        </div>
+        <nav className="frame-navigation" aria-label="Slide navigation">
+          <button
+            type="button"
+            className="frame-nav-button previous-frame"
+            aria-label="Previous slide"
+            disabled={activeSlideIndex === 0}
+            onClick={goToPreviousSlide}
+          >
+            <ChevronLeft aria-hidden="true" />
+          </button>
+          <button
+            ref={frameCounterRef}
+            type="button"
+            className="frame-counter"
+            aria-label={`Slide ${activeSlideIndex + 1} of ${deck.slides.length}. ${
+              isSlideOverviewOpen ? 'Close' : 'Open'
+            } slide overview`}
+            aria-expanded={isSlideOverviewOpen}
+            aria-controls="slide-overview"
+            onClick={() => {
+              clearCanvasSelection();
+              setIsSlideOverviewOpen((current) => !current);
+            }}
+          >
+            <span>
+              {activeSlideIndex + 1}/{MAX_SLIDES}
+            </span>
+          </button>
+          <button
+            type="button"
+            className="frame-nav-button next-frame"
+            aria-label={
+              activeSlideIndex < deck.slides.length - 1
+                ? 'Next slide'
+                : 'Create new slide'
+            }
+            disabled={
+              activeSlideIndex === deck.slides.length - 1 &&
+              deck.slides.length >= MAX_SLIDES
+            }
+            onClick={goToNextSlide}
+          >
+            <ChevronRight aria-hidden="true" />
+          </button>
+        </nav>
 
         <div className="top-actions" aria-hidden="true">
           <div className="account-control">
@@ -619,7 +994,100 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="commandbar">
+      {isSlideOverviewOpen ? (
+        <section
+          id="slide-overview"
+          className="slide-overview"
+          aria-label="All slides"
+        >
+          <button
+            type="button"
+            className="overview-scroll-button overview-scroll-left"
+            aria-label="Scroll slide previews left"
+            disabled={!overviewScrollAvailability.left}
+            onClick={() => scrollSlideOverview(-1)}
+          >
+            <ChevronLeft aria-hidden="true" />
+          </button>
+
+          <div
+            ref={overviewViewportRef}
+            className="slide-overview-viewport"
+            onScroll={updateOverviewScrollAvailability}
+          >
+            <div className="slide-overview-list">
+              {deck.slides.map((slide, index) => {
+                const isActive = slide.id === deck.activeSlideId;
+
+                return (
+                  <div className="slide-overview-group" key={slide.id}>
+                    <div className="slide-overview-card">
+                      <span className="slide-number" aria-hidden="true">
+                        {index + 1}
+                      </span>
+                      <div className="slide-thumbnail-wrap">
+                        <button
+                          ref={isActive ? activeThumbnailRef : undefined}
+                          type="button"
+                          className={`slide-thumbnail${isActive ? ' is-active' : ''}`}
+                          aria-label={`Go to slide ${index + 1}`}
+                          aria-current={isActive ? 'page' : undefined}
+                          onClick={() => selectSlide(slide.id)}
+                        >
+                          <SlidePreview images={slide.history.present} />
+                        </button>
+                        {isActive ? (
+                          <span className="slide-options" aria-hidden="true">
+                            <MoreVertical />
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="add-slide-slot">
+                      <button
+                        type="button"
+                        className="add-slide-button"
+                        aria-label={`Insert and go to a new slide after slide ${index + 1}`}
+                        title={
+                          deck.slides.length >= MAX_SLIDES
+                            ? 'Maximum of 20 slides reached'
+                            : `Insert slide after ${index + 1}`
+                        }
+                        disabled={deck.slides.length >= MAX_SLIDES}
+                        onClick={() => insertSlideAfter(slide.id)}
+                      >
+                        <Plus aria-hidden="true" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="overview-scroll-button overview-scroll-right"
+            aria-label="Scroll slide previews right"
+            disabled={!overviewScrollAvailability.right}
+            onClick={() => scrollSlideOverview(1)}
+          >
+            <ChevronRight aria-hidden="true" />
+          </button>
+
+          <button
+            type="button"
+            className="close-slide-overview"
+            aria-label="Close slide overview"
+            onClick={() => setIsSlideOverviewOpen(false)}
+          >
+            <ChevronUp aria-hidden="true" />
+          </button>
+        </section>
+      ) : null}
+
+      <div className="commandbar" inert={isSlideOverviewOpen}>
         <div className="history-controls" aria-label="History controls">
           <button
             type="button"
@@ -655,7 +1123,11 @@ export default function Home() {
         </span>
       </div>
 
-      <section className="workspace" aria-label="Whiteboard workspace">
+      <section
+        className="workspace"
+        aria-label="Whiteboard workspace"
+        inert={isSlideOverviewOpen}
+      >
         <div
           ref={boardRef}
           className="board"
@@ -797,7 +1269,11 @@ export default function Home() {
         </div>
       </section>
 
-      <nav className="tool-palette" aria-label="Board tools">
+      <nav
+        className="tool-palette"
+        aria-label="Board tools"
+        inert={isSlideOverviewOpen}
+      >
         {tools.map((tool, index) => (
           <ToolButton
             key={tool.label}
