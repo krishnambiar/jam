@@ -2,12 +2,13 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  metadataBase: new URL('http://localhost:3000'),
+  metadataBase: new URL('https://untitled-jam.groovy-wolf-5505.chatgpt.site'),
   title: 'Untitled Jam',
-  description: 'A static collaborative whiteboard interface.',
+  description: 'A collaborative whiteboard canvas for arranging and editing pasted images.',
   openGraph: {
     title: 'Untitled Jam',
-    description: 'A static collaborative whiteboard interface.',
+    description:
+      'A collaborative whiteboard canvas for arranging and editing pasted images.',
     images: [
       {
         url: '/og.png',
@@ -20,7 +21,8 @@ export const metadata: Metadata = {
   twitter: {
     card: 'summary_large_image',
     title: 'Untitled Jam',
-    description: 'A static collaborative whiteboard interface.',
+    description:
+      'A collaborative whiteboard canvas for arranging and editing pasted images.',
     images: ['/og.png'],
   },
 };
