@@ -1,41 +1,41 @@
 {
-  "name": "sites-project",
+  "name": "untitled-jam",
   "version": "0.1.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev",
-    "build": "vinext build",
-    "start": "vinext start",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
+    "dev": "concurrently --kill-others-on-fail --names api,web --prefix-colors blue,green \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "python3 -m uvicorn untitled_jam.main:app --app-dir server/src --reload --host 127.0.0.1 --port 8000 --loop asyncio",
+    "dev:web": "vite",
+    "build": "tsc --noEmit && vite build",
+    "start": "python3 -m uvicorn untitled_jam.main:app --app-dir server/src --host 0.0.0.0 --port 8000 --loop asyncio",
+    "lint": "eslint .",
+    "test": "python3 -m pytest"
   },
   "dependencies": {
     "@fontsource/roboto": "^5.3.0",
     "lucide-react": "^1.41.0",
-    "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
-    "@cloudflare/workers-types": "4.20260515.1",
-    "@openai/sites-vite-plugin": "^0.1.0 || ^0.2.0",
+    "@eslint/js": "^9.39.4",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
-    "@vitejs/plugin-rsc": "0.5.26",
+    "concurrently": "^9.2.1",
     "eslint": "9.39.4",
-    "eslint-config-next": "16.2.6",
-    "react-server-dom-webpack": "19.2.6",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "globals": "^16.5.0",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
-    "vinext": "1.0.0-beta.3",
-    "vite": "8.0.13",
-    "wrangler": "4.92.0"
+    "typescript-eslint": "^8.48.1",
+    "vite": "8.2.2"
   },
   "type": "module"
 }

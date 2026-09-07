@@ -1,26 +1,17 @@
-'use client';
-
 import {
-  Brush,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  Circle,
-  Eraser,
   MoreVertical,
-  MousePointer2,
-  Pen,
   Plus,
   Redo2,
   RotateCcw,
   RotateCw,
-  ScanText,
   Trash2,
   Undo2,
   UserRound,
   ZoomIn,
-  type LucideIcon,
 } from 'lucide-react';
 import {
   useCallback,
@@ -32,314 +23,41 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 
-const BOARD_WIDTH = 1600;
-const BOARD_HEIGHT = 900;
-const MIN_IMAGE_SIZE = 56;
-const HISTORY_LIMIT = 100;
-const MAX_SLIDES = 20;
-const INITIAL_SLIDE_ID = 'slide-1';
+import { SlidePreview } from './components/SlidePreview';
+import { ToolButton } from './components/ToolButton';
+import {
+  BOARD_HEIGHT,
+  BOARD_WIDTH,
+  EMPTY_HISTORY,
+  HISTORY_LIMIT,
+  INITIAL_SLIDE_ID,
+  MAX_SLIDES,
+  createEmptySlide,
+  resizeCorners,
+  tools,
+} from './constants';
+import type {
+  BoardRect,
+  CanvasImage,
+  DeckHistoryState,
+  Gesture,
+  HistoryState,
+  ResizeCorner,
+  SlideDeck,
+} from './types';
+import {
+  addDeckToPast,
+  addToPast,
+  boardPoint,
+  clamp,
+  decodeImageFile,
+  fittedImageSize,
+  isTextEntry,
+  normalizeRotation,
+  resizedImage,
+} from './utils';
 
-type Tool = {
-  label: string;
-  icon: LucideIcon | null;
-  menu?: boolean;
-};
-
-type CanvasImage = {
-  id: string;
-  src: string;
-  name: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  rotation: number;
-};
-
-type HistoryState = {
-  past: CanvasImage[][];
-  present: CanvasImage[];
-  future: CanvasImage[][];
-};
-
-type Slide = {
-  id: string;
-  history: HistoryState;
-};
-
-type SlideDeck = {
-  slides: Slide[];
-  activeSlideId: string;
-};
-
-type DeckHistoryState = {
-  past: SlideDeck[];
-  present: SlideDeck;
-  future: SlideDeck[];
-};
-
-type BoardRect = {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-};
-
-type Point = { x: number; y: number };
-type ResizeCorner = 'nw' | 'ne' | 'sw' | 'se';
-
-type Gesture = {
-  kind: 'move' | 'resize' | 'rotate';
-  pointerId: number;
-  slideId: string;
-  imageId: string;
-  initialImage: CanvasImage;
-  boardRect: BoardRect;
-  startPoint: Point;
-  startAngle?: number;
-  corner?: ResizeCorner;
-  moved: boolean;
-};
-
-const tools: Tool[] = [
-  { label: 'Pen', icon: Pen, menu: true },
-  { label: 'Eraser', icon: Eraser },
-  { label: 'Select', icon: MousePointer2 },
-  { label: 'Sticky note', icon: null },
-  { label: 'Shape', icon: Circle, menu: true },
-  { label: 'Text box', icon: ScanText },
-  { label: 'Laser pointer', icon: Brush },
-];
-
-const resizeCorners: ResizeCorner[] = ['nw', 'ne', 'sw', 'se'];
-
-const EMPTY_HISTORY: HistoryState = {
-  past: [],
-  present: [],
-  future: [],
-};
-
-function createEmptySlide(id: string): Slide {
-  return {
-    id,
-    history: {
-      past: [],
-      present: [],
-      future: [],
-    },
-  };
-}
-
-function ToolButton({
-  tool,
-  selected,
-  onSelect,
-}: {
-  tool: Tool;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const Icon = tool.icon;
-
-  return (
-    <button
-      type="button"
-      className={`tool-button${selected ? ' is-selected' : ''}`}
-      aria-label={tool.label}
-      aria-pressed={selected}
-      onClick={onSelect}
-    >
-      {Icon ? (
-        <Icon aria-hidden="true" strokeWidth={selected ? 2.35 : 2.2} />
-      ) : (
-        <span className="sticky-note-glyph" aria-hidden="true">
-          <span className="sticky-note-lines" />
-        </span>
-      )}
-      {tool.menu ? (
-        <ChevronRight className="tool-menu-mark" aria-hidden="true" />
-      ) : null}
-    </button>
-  );
-}
-
-function SlidePreview({ images }: { images: CanvasImage[] }) {
-  return (
-    <span className="slide-preview-canvas" aria-hidden="true">
-      {images.map((image) => (
-        <span
-          key={image.id}
-          className="slide-preview-item"
-          style={{
-            left: `${(image.x / BOARD_WIDTH) * 100}%`,
-            top: `${(image.y / BOARD_HEIGHT) * 100}%`,
-            width: `${(image.width / BOARD_WIDTH) * 100}%`,
-            height: `${(image.height / BOARD_HEIGHT) * 100}%`,
-            transform: `translate(-50%, -50%) rotate(${image.rotation}deg)`,
-          }}
-        >
-          {/* Clipboard images use local data URLs and cannot use an image optimizer. */}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={image.src} alt="" draggable={false} />
-        </span>
-      ))}
-    </span>
-  );
-}
-
-function addToPast(past: CanvasImage[][], snapshot: CanvasImage[]) {
-  return [...past, snapshot].slice(-HISTORY_LIMIT);
-}
-
-function addDeckToPast(past: SlideDeck[], snapshot: SlideDeck) {
-  return [...past, snapshot].slice(-HISTORY_LIMIT);
-}
-
-function boardPoint(clientX: number, clientY: number, rect: BoardRect): Point {
-  return {
-    x: ((clientX - rect.left) / rect.width) * BOARD_WIDTH,
-    y: ((clientY - rect.top) / rect.height) * BOARD_HEIGHT,
-  };
-}
-
-function rotateVector(point: Point, degrees: number): Point {
-  const radians = (degrees * Math.PI) / 180;
-  const cosine = Math.cos(radians);
-  const sine = Math.sin(radians);
-
-  return {
-    x: point.x * cosine - point.y * sine,
-    y: point.x * sine + point.y * cosine,
-  };
-}
-
-function clamp(value: number, minimum: number, maximum: number) {
-  if (maximum < minimum) return (minimum + maximum) / 2;
-  return Math.min(Math.max(value, minimum), maximum);
-}
-
-function normalizeRotation(degrees: number) {
-  return ((((degrees + 180) % 360) + 360) % 360) - 180;
-}
-
-function resizedImage(
-  image: CanvasImage,
-  corner: ResizeCorner,
-  pointer: Point,
-): CanvasImage {
-  const horizontalSign = corner.endsWith('e') ? 1 : -1;
-  const verticalSign = corner.startsWith('s') ? 1 : -1;
-  const aspectRatio = image.width / image.height;
-  const fixedOffset = rotateVector(
-    {
-      x: (-horizontalSign * image.width) / 2,
-      y: (-verticalSign * image.height) / 2,
-    },
-    image.rotation,
-  );
-  const fixedCorner = {
-    x: image.x + fixedOffset.x,
-    y: image.y + fixedOffset.y,
-  };
-  const pointerFromFixed = rotateVector(
-    { x: pointer.x - fixedCorner.x, y: pointer.y - fixedCorner.y },
-    -image.rotation,
-  );
-  const diagonal = {
-    x: horizontalSign * aspectRatio,
-    y: verticalSign,
-  };
-  const projectedHeight =
-    (pointerFromFixed.x * diagonal.x + pointerFromFixed.y * diagonal.y) /
-    (diagonal.x * diagonal.x + diagonal.y * diagonal.y);
-  const minimumHeight = Math.max(MIN_IMAGE_SIZE, MIN_IMAGE_SIZE / aspectRatio);
-  const nextHeight = clamp(projectedHeight, minimumHeight, BOARD_HEIGHT * 2);
-  const nextWidth = nextHeight * aspectRatio;
-  const draggedOffset = rotateVector(
-    {
-      x: horizontalSign * nextWidth,
-      y: verticalSign * nextHeight,
-    },
-    image.rotation,
-  );
-  const draggedCorner = {
-    x: fixedCorner.x + draggedOffset.x,
-    y: fixedCorner.y + draggedOffset.y,
-  };
-
-  return {
-    ...image,
-    x: (fixedCorner.x + draggedCorner.x) / 2,
-    y: (fixedCorner.y + draggedCorner.y) / 2,
-    width: nextWidth,
-    height: nextHeight,
-  };
-}
-
-function fittedImageSize(naturalWidth: number, naturalHeight: number) {
-  const maxWidth = BOARD_WIDTH * 0.42;
-  const maxHeight = BOARD_HEIGHT * 0.48;
-  let scale = Math.min(1, maxWidth / naturalWidth, maxHeight / naturalHeight);
-  const longestSide = Math.max(naturalWidth, naturalHeight) * scale;
-
-  if (longestSide < 120) {
-    scale *= 120 / longestSide;
-  }
-
-  return {
-    width: naturalWidth * scale,
-    height: naturalHeight * scale,
-  };
-}
-
-function isTextEntry(target: EventTarget | null) {
-  if (!(target instanceof HTMLElement)) return false;
-  return (
-    target.isContentEditable ||
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLTextAreaElement ||
-    target instanceof HTMLSelectElement
-  );
-}
-
-function decodeImageFile(file: File) {
-  return new Promise<{
-    src: string;
-    name: string;
-    naturalWidth: number;
-    naturalHeight: number;
-  }>((resolve, reject) => {
-    const reader = new FileReader();
-
-    reader.onerror = () => reject(new Error('The clipboard file could not be read.'));
-    reader.onload = () => {
-      if (typeof reader.result !== 'string') {
-        reject(new Error('The clipboard file was not an image.'));
-        return;
-      }
-
-      const image = new Image();
-      image.onerror = () => reject(new Error('The image format could not be decoded.'));
-      image.onload = () => {
-        if (!image.naturalWidth || !image.naturalHeight) {
-          reject(new Error('The image has no visible dimensions.'));
-          return;
-        }
-
-        resolve({
-          src: reader.result as string,
-          name: file.name || 'Pasted image',
-          naturalWidth: image.naturalWidth,
-          naturalHeight: image.naturalHeight,
-        });
-      };
-      image.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-export default function Home() {
+export default function BoardApp() {
   const [selectedTool, setSelectedTool] = useState(2);
   const [deckHistory, setDeckHistory] = useState<DeckHistoryState>(() => ({
     past: [],
@@ -1448,8 +1166,6 @@ export default function Home() {
                   style={frameStyle}
                   onPointerDown={(event) => startGesture(event, image, 'move')}
                 >
-                  {/* Clipboard images use local data URLs and cannot use an image optimizer. */}
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     className="canvas-image"
                     src={image.src}
