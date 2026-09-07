@@ -535,6 +535,25 @@ export default function Home() {
     [cancelActiveGesture, closeSlideMenu],
   );
 
+  const navigateToAdjacentSlide = useCallback(
+    (direction: -1 | 1) => {
+      cancelActiveGesture();
+      setSelectedImageId(null);
+      setOpenMenuId(null);
+      closeSlideMenu();
+      setDeck((current) => {
+        const currentIndex = current.slides.findIndex(
+          (slide) => slide.id === current.activeSlideId,
+        );
+        const adjacentSlide = current.slides[currentIndex + direction];
+        return adjacentSlide
+          ? { ...current, activeSlideId: adjacentSlide.id }
+          : current;
+      });
+    },
+    [cancelActiveGesture, closeSlideMenu, setDeck],
+  );
+
   const deleteImage = useCallback(
     (imageId: string) => {
       commit((images) => {
@@ -733,6 +752,24 @@ export default function Home() {
         return;
       }
 
+      const isHorizontalArrow =
+        event.key === 'ArrowLeft' || event.key === 'ArrowRight';
+      const canNavigateWithArrows =
+        isSlideOverviewOpen || (!selectedImageId && !openMenuId);
+
+      if (
+        isHorizontalArrow &&
+        canNavigateWithArrows &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey
+      ) {
+        event.preventDefault();
+        navigateToAdjacentSlide(event.key === 'ArrowLeft' ? -1 : 1);
+        return;
+      }
+
       if (
         isSlideOverviewOpen &&
         (event.key === 'Delete' || event.key === 'Backspace')
@@ -761,6 +798,8 @@ export default function Home() {
     deleteImage,
     deleteSlide,
     isSlideOverviewOpen,
+    navigateToAdjacentSlide,
+    openMenuId,
     openSlideMenuId,
     redo,
     selectedImageId,
@@ -982,18 +1021,8 @@ export default function Home() {
   );
 
   const goToPreviousSlide = useCallback(() => {
-    clearCanvasSelection();
-    setDeck((current) => {
-      const currentIndex = current.slides.findIndex(
-        (slide) => slide.id === current.activeSlideId,
-      );
-      if (currentIndex <= 0) return current;
-      return {
-        ...current,
-        activeSlideId: current.slides[currentIndex - 1].id,
-      };
-    });
-  }, [clearCanvasSelection, setDeck]);
+    navigateToAdjacentSlide(-1);
+  }, [navigateToAdjacentSlide]);
 
   const goToNextSlide = useCallback(() => {
     const newSlideId = crypto.randomUUID();
