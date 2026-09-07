@@ -350,6 +350,15 @@ export default function Home() {
   const gestureRef = useRef<Gesture | null>(null);
   const activeSlideIdRef = useRef(deck.activeSlideId);
   const wasSlideOverviewOpenRef = useRef(false);
+  const overviewReturnFocusRef = useRef<'counter' | 'canvas'>('counter');
+
+  const closeSlideOverview = useCallback(
+    (returnFocus: 'counter' | 'canvas' = 'counter') => {
+      overviewReturnFocusRef.current = returnFocus;
+      setIsSlideOverviewOpen(false);
+    },
+    [],
+  );
 
   useLayoutEffect(() => {
     activeSlideIdRef.current = deck.activeSlideId;
@@ -604,7 +613,7 @@ export default function Home() {
       if (isTextEntry(event.target)) return;
 
       if (event.key === 'Escape') {
-        setIsSlideOverviewOpen(false);
+        closeSlideOverview('counter');
         setOpenMenuId(null);
         setSelectedImageId(null);
         return;
@@ -638,7 +647,14 @@ export default function Home() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [deleteImage, isSlideOverviewOpen, redo, selectedImageId, undo]);
+  }, [
+    closeSlideOverview,
+    deleteImage,
+    isSlideOverviewOpen,
+    redo,
+    selectedImageId,
+    undo,
+  ]);
 
   useEffect(() => {
     if (!notice) return;
@@ -898,7 +914,9 @@ export default function Home() {
       if (!viewport) return;
       viewport.scrollBy({
         left: direction * Math.max(277, viewport.clientWidth * 0.72),
-        behavior: 'smooth',
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches
+          ? 'auto'
+          : 'smooth',
       });
     },
     [],
@@ -908,7 +926,16 @@ export default function Home() {
     if (!isSlideOverviewOpen) {
       if (wasSlideOverviewOpenRef.current) {
         wasSlideOverviewOpenRef.current = false;
-        frameCounterRef.current?.focus();
+        const focusTarget = overviewReturnFocusRef.current;
+        overviewReturnFocusRef.current = 'counter';
+        const animationFrame = window.requestAnimationFrame(() => {
+          if (focusTarget === 'canvas') {
+            boardRef.current?.focus({ preventScroll: true });
+          } else {
+            frameCounterRef.current?.focus({ preventScroll: true });
+          }
+        });
+        return () => window.cancelAnimationFrame(animationFrame);
       }
       return;
     }
@@ -962,7 +989,11 @@ export default function Home() {
             aria-controls="slide-overview"
             onClick={() => {
               clearCanvasSelection();
-              setIsSlideOverviewOpen((current) => !current);
+              if (isSlideOverviewOpen) {
+                closeSlideOverview('counter');
+              } else {
+                setIsSlideOverviewOpen(true);
+              }
             }}
           >
             <span>
@@ -994,12 +1025,24 @@ export default function Home() {
         </div>
       </header>
 
-      {isSlideOverviewOpen ? (
-        <section
-          id="slide-overview"
-          className="slide-overview"
-          aria-label="All slides"
-        >
+      <button
+        type="button"
+        className={`slide-overview-dismiss-layer${
+          isSlideOverviewOpen ? ' is-open' : ''
+        }`}
+        aria-label="Close slide overview and return to canvas"
+        aria-hidden={isSlideOverviewOpen ? undefined : true}
+        tabIndex={-1}
+        onClick={() => closeSlideOverview('canvas')}
+      />
+
+      <section
+        id="slide-overview"
+        className={`slide-overview${isSlideOverviewOpen ? ' is-open' : ''}`}
+        aria-label="All slides"
+        aria-hidden={isSlideOverviewOpen ? undefined : true}
+        inert={!isSlideOverviewOpen}
+      >
           <button
             type="button"
             className="overview-scroll-button overview-scroll-left"
@@ -1080,12 +1123,11 @@ export default function Home() {
             type="button"
             className="close-slide-overview"
             aria-label="Close slide overview"
-            onClick={() => setIsSlideOverviewOpen(false)}
+            onClick={() => closeSlideOverview('counter')}
           >
             <ChevronUp aria-hidden="true" />
           </button>
-        </section>
-      ) : null}
+      </section>
 
       <div className="commandbar" inert={isSlideOverviewOpen}>
         <div className="history-controls" aria-label="History controls">

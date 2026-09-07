@@ -164,6 +164,26 @@ select {
   transform: translateX(-50%);
 }
 
+.slide-overview-dismiss-layer {
+  position: absolute;
+  z-index: 19;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  visibility: hidden;
+  background: transparent;
+  cursor: default;
+  pointer-events: none;
+}
+
+.slide-overview-dismiss-layer.is-open {
+  visibility: visible;
+  pointer-events: auto;
+}
+
 .slide-overview {
   --slide-thumbnail-width: 225px;
 
@@ -173,8 +193,24 @@ select {
   height: 233px;
   overflow: hidden;
   border-bottom: 1px solid #dadce0;
+  visibility: hidden;
   background: #fff;
   box-shadow: 0 4px 9px rgb(60 64 67 / 24%);
+  pointer-events: none;
+  transform: translate3d(0, -105%, 0);
+  transition:
+    transform 280ms cubic-bezier(0.2, 0, 0, 1),
+    visibility 0s linear 280ms;
+  will-change: transform;
+}
+
+.slide-overview.is-open {
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate3d(0, 0, 0);
+  transition:
+    transform 280ms cubic-bezier(0.2, 0, 0, 1),
+    visibility 0s;
 }
 
 .slide-overview-viewport {
@@ -420,6 +456,13 @@ select {
   width: 22px;
   height: 22px;
   stroke-width: 2.3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .slide-overview,
+  .slide-overview.is-open {
+    transition: none;
+  }
 }
 
 .top-actions {
