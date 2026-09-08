@@ -680,6 +680,10 @@ select {
   box-shadow: 0 0 0 2px rgb(26 115 232 / 45%), 0 1px 2px rgb(60 64 67 / 14%);
 }
 
+.board.is-placing-sticky-note {
+  cursor: crosshair;
+}
+
 .canvas-item {
   position: absolute;
   z-index: 1;
@@ -687,8 +691,25 @@ select {
   transform: translate(-50%, -50%);
 }
 
-.canvas-item.is-selected {
-  z-index: 20;
+.canvas-item.is-discarding {
+  z-index: 19;
+  animation: discard-empty-sticky-note 360ms cubic-bezier(0.4, 0, 1, 1)
+    forwards;
+  pointer-events: none;
+  will-change: opacity, transform;
+}
+
+@keyframes discard-empty-sticky-note {
+  to {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 110dvh));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-item.is-discarding {
+    animation-duration: 1ms;
+  }
 }
 
 .canvas-item-frame {
@@ -727,6 +748,10 @@ select {
   background: var(--sticky-note-color);
   box-shadow: 0 2px 3px rgb(60 64 67 / 28%);
   pointer-events: none;
+}
+
+.sticky-note-surface.is-editing {
+  pointer-events: auto;
 }
 
 .canvas-item-frame.is-selected .sticky-note-surface {
@@ -977,32 +1002,35 @@ select {
 }
 
 .note-color-anchor {
+  --picker-button-size: clamp(22px, 10cqw, 34px);
+  --picker-open-height: clamp(28px, 12cqw, 38px);
+
   position: absolute;
   z-index: 7;
-  right: -27px;
-  bottom: -27px;
-  width: 54px;
-  height: 54px;
+  right: calc(var(--picker-button-size) * -0.5);
+  bottom: calc(var(--picker-button-size) * -0.5);
+  width: var(--picker-button-size);
+  height: var(--picker-button-size);
   transform: rotate(var(--counter-rotation));
-  transform-origin: 27px 27px;
+  transform-origin: 50% 50%;
 }
 
 .note-color-anchor.is-open {
-  right: -29px;
-  bottom: -29px;
-  width: min(368px, calc(100vw - 116px));
-  height: 58px;
-  transform-origin: calc(100% - 29px) 29px;
+  right: calc(var(--picker-open-height) * -0.5);
+  bottom: calc(var(--picker-open-height) * -0.5);
+  width: clamp(132px, 76cqw, 216px);
+  height: var(--picker-open-height);
+  transform-origin: calc(100% - var(--picker-open-height) * 0.5) 50%;
 }
 
 .note-color-anchor.is-contained-right {
   right: 0;
-  transform-origin: 100% 27px;
+  transform-origin: 100% 50%;
 }
 
 .note-color-anchor.is-contained-bottom {
   bottom: 0;
-  transform-origin: 27px 100%;
+  transform-origin: 50% 100%;
 }
 
 .note-color-anchor.is-contained-right.is-contained-bottom {
@@ -1011,25 +1039,25 @@ select {
 
 .note-color-anchor.is-open.opens-right:not(.is-contained-right) {
   right: auto;
-  left: calc(100% - 29px);
-  transform-origin: 29px 29px;
+  left: calc(100% - var(--picker-open-height) * 0.5);
+  transform-origin: calc(var(--picker-open-height) * 0.5) 50%;
 }
 
 .note-color-anchor.is-open.is-contained-right {
   right: 0;
   left: auto;
-  transform-origin: 100% 29px;
+  transform-origin: 100% 50%;
 }
 
 .note-color-anchor.is-open.is-contained-bottom {
   bottom: 0;
-  transform-origin: calc(100% - 29px) 100%;
+  transform-origin: calc(100% - var(--picker-open-height) * 0.5) 100%;
 }
 
 .note-color-anchor.is-open.opens-right.is-contained-bottom:not(
     .is-contained-right
   ) {
-  transform-origin: 29px 100%;
+  transform-origin: calc(var(--picker-open-height) * 0.5) 100%;
 }
 
 .note-color-anchor.is-open.is-contained-right.is-contained-bottom {
@@ -1067,8 +1095,8 @@ select {
 .note-color-choice > span {
   position: relative;
   display: block;
-  width: 24px;
-  height: 24px;
+  width: clamp(12px, 5cqw, 18px);
+  height: clamp(12px, 5cqw, 18px);
   border-radius: 50%;
 }
 
@@ -1081,10 +1109,10 @@ select {
 .note-color-trigger > span.is-no-fill::after,
 .note-color-choice.is-no-fill > span::after {
   position: absolute;
-  top: 10px;
-  left: -2px;
-  width: 27px;
-  height: 2px;
+  top: 50%;
+  left: -10%;
+  width: 120%;
+  height: 1px;
   border-radius: 1px;
   background: #c7cbd0;
   content: '';
@@ -1097,13 +1125,13 @@ select {
   grid-template-columns: repeat(6, 1fr);
   align-items: center;
   padding: 0;
-  border-radius: 29px;
+  border-radius: calc(var(--picker-open-height) * 0.5);
 }
 
 .note-color-choice {
   display: grid;
-  width: 46px;
-  height: 46px;
+  width: clamp(20px, 11cqw, 32px);
+  height: calc(var(--picker-open-height) - 2px);
   margin: 0 auto;
   padding: 0;
   place-items: center;

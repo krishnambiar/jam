@@ -131,8 +131,19 @@ export function StickyNoteContent({
       ref={surfaceRef}
       className={`sticky-note-surface${layout.dense ? ' is-dense' : ''}${
         layout.overflowing ? ' is-overflowing' : ''
-      }${note.color === 'transparent' ? ' is-transparent' : ''}`}
+      }${note.color === 'transparent' ? ' is-transparent' : ''}${
+        isEditing ? ' is-editing' : ''
+      }`}
       style={style}
+      onPointerDown={(event) => {
+        if (!isEditing || event.target instanceof HTMLTextAreaElement) return;
+        event.preventDefault();
+        event.stopPropagation();
+        editorRef.current?.focus({ preventScroll: true });
+      }}
+      onDoubleClick={(event) => {
+        if (isEditing) event.stopPropagation();
+      }}
     >
       <div className="sticky-note-copy-shell">
         {isEditing ? (

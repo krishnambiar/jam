@@ -87,6 +87,8 @@ export type Gesture = {
   slideId: string;
   itemId: string;
   initialItem: CanvasItem;
+  initialIndex: number;
+  broughtToFront: boolean;
   boardRect: BoardRect;
   startPoint: Point;
   startAngle?: number;

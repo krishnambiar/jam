@@ -71,6 +71,13 @@ type StickyNoteEdit = {
   itemId: string;
   slideId: string;
   draft: string;
+  isNew: boolean;
+};
+
+type PendingStickyNote = {
+  note: CanvasStickyNote;
+  slideId: string;
+  discarding: boolean;
 };
 
 function moveColorChoiceFocus(event: ReactKeyboardEvent<HTMLButtonElement>) {
@@ -98,6 +105,34 @@ function moveColorChoiceFocus(event: ReactKeyboardEvent<HTMLButtonElement>) {
   choices[nextIndex]?.focus();
 }
 
+function bringItemToFront(items: CanvasItem[], itemId: string) {
+  const itemIndex = items.findIndex((item) => item.id === itemId);
+  if (itemIndex < 0 || itemIndex === items.length - 1) return items;
+
+  return [
+    ...items.slice(0, itemIndex),
+    ...items.slice(itemIndex + 1),
+    items[itemIndex],
+  ];
+}
+
+function restoreGestureStart(items: CanvasItem[], gesture: Gesture) {
+  const itemIndex = items.findIndex((item) => item.id === gesture.itemId);
+  if (itemIndex < 0) return items;
+
+  const withoutItem = [
+    ...items.slice(0, itemIndex),
+    ...items.slice(itemIndex + 1),
+  ];
+  const restoredIndex = Math.min(gesture.initialIndex, withoutItem.length);
+
+  return [
+    ...withoutItem.slice(0, restoredIndex),
+    gesture.initialItem,
+    ...withoutItem.slice(restoredIndex),
+  ];
+}
+
 export default function BoardApp() {
   const [selectedToolId, setSelectedToolId] = useState<Tool['id']>('select');
   const [deckHistory, setDeckHistory] = useState<DeckHistoryState>(() => ({
@@ -120,6 +155,8 @@ export default function BoardApp() {
   const [stickyNoteEdit, setStickyNoteEdit] = useState<StickyNoteEdit | null>(
     null,
   );
+  const [pendingStickyNote, setPendingStickyNote] =
+    useState<PendingStickyNote | null>(null);
   const [openSlideMenuId, setOpenSlideMenuId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const boardRef = useRef<HTMLDivElement>(null);
@@ -129,6 +166,8 @@ export default function BoardApp() {
   const frameCounterRef = useRef<HTMLButtonElement>(null);
   const activeColorChoiceRef = useRef<HTMLButtonElement>(null);
   const focusColorPickerOnOpenRef = useRef(false);
+  const finishingStickyNoteIdRef = useRef<string | null>(null);
+  const stickyNoteDiscardTimersRef = useRef<number[]>([]);
   const gestureRef = useRef<Gesture | null>(null);
   const activeSlideIdRef = useRef(deck.activeSlideId);
   const wasSlideOverviewOpenRef = useRef(false);
@@ -197,7 +236,7 @@ export default function BoardApp() {
   const cancelActiveGesture = useCallback(() => {
     const gesture = gestureRef.current;
     gestureRef.current = null;
-    if (!gesture?.moved) return;
+    if (!gesture || (!gesture.moved && !gesture.broughtToFront)) return;
 
     setDeck((current) => ({
       ...current,
@@ -207,8 +246,9 @@ export default function BoardApp() {
               ...slide,
               history: {
                 ...slide.history,
-                present: slide.history.present.map((item) =>
-                  item.id === gesture.itemId ? gesture.initialItem : item,
+                present: restoreGestureStart(
+                  slide.history.present,
+                  gesture,
                 ),
               },
             }
@@ -239,6 +279,7 @@ export default function BoardApp() {
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
     setStickyNoteEdit(null);
+    setPendingStickyNote(null);
     closeSlideMenu(openSlideMenuId !== null);
     setSelectedItemId(null);
     setDeckHistory((current) => {
@@ -258,6 +299,7 @@ export default function BoardApp() {
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
     setStickyNoteEdit(null);
+    setPendingStickyNote(null);
     closeSlideMenu(openSlideMenuId !== null);
     setSelectedItemId(null);
     setDeckHistory((current) => {
@@ -279,6 +321,7 @@ export default function BoardApp() {
       setOpenItemMenuId(null);
       setOpenColorPickerId(null);
       setStickyNoteEdit(null);
+      setPendingStickyNote(null);
       closeSlideMenu();
       setDeckHistory((current) => {
         if (current.present.slides.length <= 1) return current;
@@ -313,6 +356,7 @@ export default function BoardApp() {
       setOpenItemMenuId(null);
       setOpenColorPickerId(null);
       setStickyNoteEdit(null);
+      setPendingStickyNote(null);
       closeSlideMenu();
       setDeck((current) => {
         const currentIndex = current.slides.findIndex(
@@ -339,6 +383,9 @@ export default function BoardApp() {
       setStickyNoteEdit((current) =>
         current?.itemId === itemId ? null : current,
       );
+      setPendingStickyNote((current) =>
+        current?.note.id === itemId ? null : current,
+      );
     },
     [commit],
   );
@@ -357,11 +404,58 @@ export default function BoardApp() {
     [commit],
   );
 
+  const discardPendingStickyNote = useCallback((itemId: string) => {
+    setSelectedItemId((current) => (current === itemId ? null : current));
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+    setPendingStickyNote((current) =>
+      current?.note.id === itemId ? { ...current, discarding: true } : current,
+    );
+
+    const timeout = window.setTimeout(() => {
+      setPendingStickyNote((current) =>
+        current?.note.id === itemId ? null : current,
+      );
+      stickyNoteDiscardTimersRef.current =
+        stickyNoteDiscardTimersRef.current.filter(
+          (timer) => timer !== timeout,
+        );
+    }, 360);
+    stickyNoteDiscardTimersRef.current.push(timeout);
+  }, []);
+
   const finishStickyNoteEdit = useCallback(() => {
     if (!stickyNoteEdit) return;
+    if (finishingStickyNoteIdRef.current === stickyNoteEdit.itemId) return;
+    finishingStickyNoteIdRef.current = stickyNoteEdit.itemId;
     setStickyNoteEdit(null);
+    window.queueMicrotask(() => {
+      if (finishingStickyNoteIdRef.current === stickyNoteEdit.itemId) {
+        finishingStickyNoteIdRef.current = null;
+      }
+    });
 
     if (activeSlideIdRef.current !== stickyNoteEdit.slideId) return;
+    if (stickyNoteEdit.isNew) {
+      if (!stickyNoteEdit.draft.trim()) {
+        discardPendingStickyNote(stickyNoteEdit.itemId);
+        return;
+      }
+
+      const pending =
+        pendingStickyNote?.note.id === stickyNoteEdit.itemId
+          ? pendingStickyNote.note
+          : null;
+      if (!pending) return;
+
+      setPendingStickyNote(null);
+      commit((items) => [
+        ...items,
+        { ...pending, text: stickyNoteEdit.draft },
+      ]);
+      return;
+    }
+
     commit((items) => {
       const note = items.find((item) => item.id === stickyNoteEdit.itemId);
       if (
@@ -378,7 +472,7 @@ export default function BoardApp() {
           : item,
       );
     });
-  }, [commit, stickyNoteEdit]);
+  }, [commit, discardPendingStickyNote, pendingStickyNote, stickyNoteEdit]);
 
   const beginStickyNoteEdit = useCallback(
     (note: CanvasStickyNote) => {
@@ -393,6 +487,7 @@ export default function BoardApp() {
         itemId: note.id,
         slideId: deck.activeSlideId,
         draft,
+        isNew: false,
       });
     },
     [
@@ -403,39 +498,42 @@ export default function BoardApp() {
     ],
   );
 
-  const createStickyNote = useCallback(() => {
+  const placeStickyNote = useCallback((clientX: number, clientY: number) => {
+    if (!boardRef.current) return;
     finishStickyNoteEdit();
+    cancelActiveGesture();
+    const boardBounds = boardRef.current.getBoundingClientRect();
+    const point = boardPoint(clientX, clientY, {
+      left: boardBounds.left,
+      top: boardBounds.top,
+      width: boardBounds.width,
+      height: boardBounds.height,
+    });
     const id = crypto.randomUUID();
     const note = {
       kind: 'sticky-note',
       id,
       text: '',
       color: 'yellow',
-      x: BOARD_WIDTH / 2,
-      y: BOARD_HEIGHT / 2,
+      x: clamp(
+        point.x,
+        STICKY_NOTE_SIZE / 2,
+        BOARD_WIDTH - STICKY_NOTE_SIZE / 2,
+      ),
+      y: clamp(
+        point.y,
+        STICKY_NOTE_SIZE / 2,
+        BOARD_HEIGHT - STICKY_NOTE_SIZE / 2,
+      ),
       width: STICKY_NOTE_SIZE,
       height: STICKY_NOTE_SIZE,
       rotation: 0,
     } satisfies CanvasStickyNote;
 
-    commit((items) => {
-      const offset = (items.length % 5) * 22;
-      return [
-        ...items,
-        {
-          ...note,
-          x: clamp(
-            note.x + offset,
-            note.width / 2,
-            BOARD_WIDTH - note.width / 2,
-          ),
-          y: clamp(
-            note.y + offset,
-            note.height / 2,
-            BOARD_HEIGHT - note.height / 2,
-          ),
-        },
-      ];
+    setPendingStickyNote({
+      note,
+      slideId: deck.activeSlideId,
+      discarding: false,
     });
     setSelectedToolId('select');
     setSelectedItemId(id);
@@ -445,11 +543,22 @@ export default function BoardApp() {
       itemId: id,
       slideId: deck.activeSlideId,
       draft: '',
+      isNew: true,
     });
-  }, [commit, deck.activeSlideId, finishStickyNoteEdit]);
+  }, [cancelActiveGesture, deck.activeSlideId, finishStickyNoteEdit]);
 
   const changeStickyNoteColor = useCallback(
     (itemId: string, color: StickyNoteColor) => {
+      if (pendingStickyNote?.note.id === itemId) {
+        setPendingStickyNote((current) =>
+          current?.note.id === itemId && current.note.color !== color
+            ? { ...current, note: { ...current.note, color } }
+            : current,
+        );
+        setOpenColorPickerId(null);
+        return;
+      }
+
       commit((items) => {
         const note = items.find((item) => item.id === itemId);
         if (!note || note.kind !== 'sticky-note' || note.color === color) {
@@ -464,19 +573,15 @@ export default function BoardApp() {
       });
       setOpenColorPickerId(null);
     },
-    [commit],
+    [commit, pendingStickyNote],
   );
 
   const selectTool = useCallback(
     (tool: Tool) => {
-      if (tool.id === 'sticky-note') {
-        createStickyNote();
-        return;
-      }
       finishStickyNoteEdit();
       setSelectedToolId(tool.id);
     },
-    [createStickyNote, finishStickyNoteEdit],
+    [finishStickyNoteEdit],
   );
 
   const pasteImages = useCallback(
@@ -715,6 +820,15 @@ export default function BoardApp() {
     return () => window.clearTimeout(timeout);
   }, [notice]);
 
+  useEffect(
+    () => () => {
+      stickyNoteDiscardTimersRef.current.forEach((timer) =>
+        window.clearTimeout(timer),
+      );
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!openItemMenuId) return;
 
@@ -792,6 +906,11 @@ export default function BoardApp() {
       height: rect.height,
     };
     const startPoint = boardPoint(event.clientX, event.clientY, compactRect);
+    const initialIndex = history.present.findIndex(
+      (currentItem) => currentItem.id === itemAtStart.id,
+    );
+    const broughtToFront =
+      initialIndex >= 0 && initialIndex !== history.present.length - 1;
 
     gestureRef.current = {
       kind,
@@ -799,6 +918,8 @@ export default function BoardApp() {
       slideId: deck.activeSlideId,
       itemId: itemAtStart.id,
       initialItem: itemAtStart,
+      initialIndex,
+      broughtToFront,
       boardRect: compactRect,
       startPoint,
       startAngle:
@@ -809,6 +930,25 @@ export default function BoardApp() {
       corner,
       moved: false,
     };
+    if (broughtToFront) {
+      setDeck((current) => ({
+        ...current,
+        slides: current.slides.map((slide) =>
+          slide.id === deck.activeSlideId
+            ? {
+                ...slide,
+                history: {
+                  ...slide.history,
+                  present: bringItemToFront(
+                    slide.history.present,
+                    itemAtStart.id,
+                  ),
+                },
+              }
+            : slide,
+        ),
+      }));
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
     setSelectedToolId('select');
     setSelectedItemId(itemAtStart.id);
@@ -889,7 +1029,7 @@ export default function BoardApp() {
     if (!gesture || gesture.pointerId !== event.pointerId) return;
 
     gestureRef.current = null;
-    if (!gesture.moved) return;
+    if (!gesture.moved && !gesture.broughtToFront) return;
 
     setDeckHistory((current) => {
       if (current.present.activeSlideId !== gesture.slideId) return current;
@@ -899,8 +1039,9 @@ export default function BoardApp() {
       );
       if (!targetSlide) return current;
 
-      const beforeItems = targetSlide.history.present.map((item) =>
-        item.id === gesture.itemId ? gesture.initialItem : item,
+      const beforeItems = restoreGestureStart(
+        targetSlide.history.present,
+        gesture,
       );
       const beforeDeck = {
         ...current.present,
@@ -944,6 +1085,7 @@ export default function BoardApp() {
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
     setStickyNoteEdit(null);
+    setPendingStickyNote(null);
     closeSlideMenu();
   }, [cancelActiveGesture, closeSlideMenu]);
 
@@ -1089,7 +1231,10 @@ export default function BoardApp() {
     updateOverviewScrollAvailability,
   ]);
 
-  const items = history.present;
+  const items =
+    pendingStickyNote?.slideId === deck.activeSlideId
+      ? [...history.present, pendingStickyNote.note]
+      : history.present;
 
   return (
     <main className="app-shell">
@@ -1349,12 +1494,19 @@ export default function BoardApp() {
       >
         <div
           ref={boardRef}
-          className="board"
+          className={`board${
+            selectedToolId === 'sticky-note' ? ' is-placing-sticky-note' : ''
+          }`}
           role="region"
           tabIndex={0}
           aria-label="Board. Add sticky notes or paste images, then drag items to move them."
           onPointerDown={(event) => {
             if (event.currentTarget !== event.target) return;
+            if (selectedToolId === 'sticky-note') {
+              event.preventDefault();
+              placeStickyNote(event.clientX, event.clientY);
+              return;
+            }
             setSelectedItemId(null);
             setOpenItemMenuId(null);
             setOpenColorPickerId(null);
@@ -1364,6 +1516,9 @@ export default function BoardApp() {
           onPointerCancel={finishGesture}
         >
           {items.map((item) => {
+            const isPending = pendingStickyNote?.note.id === item.id;
+            const isDiscarding =
+              isPending && pendingStickyNote?.discarding === true;
             const isSelected = selectedItemId === item.id;
             const isMenuOpen = openItemMenuId === item.id;
             const isColorPickerOpen = openColorPickerId === item.id;
@@ -1388,7 +1543,9 @@ export default function BoardApp() {
             return (
               <div
                 key={item.id}
-                className={`canvas-item${isSelected ? ' is-selected' : ''}`}
+                className={`canvas-item${isSelected ? ' is-selected' : ''}${
+                  isDiscarding ? ' is-discarding' : ''
+                }`}
                 style={{
                   left: `${(item.x / BOARD_WIDTH) * 100}%`,
                   top: `${(item.y / BOARD_HEIGHT) * 100}%`,
@@ -1423,6 +1580,7 @@ export default function BoardApp() {
                   onKeyDown={(event) => {
                     if (
                       event.currentTarget !== event.target ||
+                      isPending ||
                       item.kind !== 'sticky-note' ||
                       (event.key !== 'Enter' && event.key !== 'F2')
                     ) {
@@ -1431,7 +1589,14 @@ export default function BoardApp() {
                     event.preventDefault();
                     beginStickyNoteEdit(item);
                   }}
-                  onPointerDown={(event) => startGesture(event, item, 'move')}
+                  onPointerDown={(event) => {
+                    if (isPending) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      return;
+                    }
+                    startGesture(event, item, 'move');
+                  }}
                 >
                   {item.kind === 'image' ? (
                     <img
@@ -1462,28 +1627,32 @@ export default function BoardApp() {
                   {isSelected ? (
                     <>
                       <span className="selection-outline" aria-hidden="true" />
-                      <button
-                        type="button"
-                        className="rotation-zone"
-                        aria-label={`Rotate ${itemLabel}`}
-                        title={`Drag around the ${itemLabel} to rotate. Hold Shift to snap.`}
-                        onPointerDown={(event) =>
-                          startGesture(event, item, 'rotate')
-                        }
-                      />
+                      {!isPending ? (
+                        <>
+                          <button
+                            type="button"
+                            className="rotation-zone"
+                            aria-label={`Rotate ${itemLabel}`}
+                            title={`Drag around the ${itemLabel} to rotate. Hold Shift to snap.`}
+                            onPointerDown={(event) =>
+                              startGesture(event, item, 'rotate')
+                            }
+                          />
 
-                      {resizeCorners.map((corner) => (
-                        <button
-                          key={corner}
-                          type="button"
-                          className={`resize-handle resize-${corner}`}
-                          aria-label={`Resize ${itemLabel} from ${corner.toUpperCase()} corner`}
-                          title="Drag to resize"
-                          onPointerDown={(event) =>
-                            startGesture(event, item, 'resize', corner)
-                          }
-                        />
-                      ))}
+                          {resizeCorners.map((corner) => (
+                            <button
+                              key={corner}
+                              type="button"
+                              className={`resize-handle resize-${corner}`}
+                              aria-label={`Resize ${itemLabel} from ${corner.toUpperCase()} corner`}
+                              title="Drag to resize"
+                              onPointerDown={(event) =>
+                                startGesture(event, item, 'resize', corner)
+                              }
+                            />
+                          ))}
+                        </>
+                      ) : null}
 
                       {item.kind === 'sticky-note' ? (
                         <div
@@ -1588,12 +1757,13 @@ export default function BoardApp() {
                         </div>
                       ) : null}
 
-                      <div
-                        className="item-menu-anchor"
-                        data-item-menu={item.id}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onDoubleClick={(event) => event.stopPropagation()}
-                      >
+                      {!isPending ? (
+                        <div
+                          className="item-menu-anchor"
+                          data-item-menu={item.id}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onDoubleClick={(event) => event.stopPropagation()}
+                        >
                         <button
                           type="button"
                           className="item-menu-button"
@@ -1639,7 +1809,8 @@ export default function BoardApp() {
                             </button>
                           </div>
                         ) : null}
-                      </div>
+                        </div>
+                      ) : null}
                     </>
                   ) : null}
                 </div>
