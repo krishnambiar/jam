@@ -8,6 +8,8 @@ import {
 } from 'lucide-react';
 
 import type {
+  DrawingColor,
+  DrawingStyle,
   HistoryState,
   ResizeCorner,
   Slide,
@@ -32,6 +34,42 @@ export const tools: Tool[] = [
   { id: 'text-box', label: 'Text box', icon: ScanText },
   { id: 'laser-pointer', label: 'Laser pointer', icon: Brush },
 ];
+
+export const drawingStyles: ReadonlyArray<{
+  id: DrawingStyle;
+  label: string;
+  strokeWidth: number;
+  opacity: number;
+}> = [
+  { id: 'pen', label: 'Pen', strokeWidth: 4, opacity: 1 },
+  { id: 'marker', label: 'Marker', strokeWidth: 9, opacity: 1 },
+  { id: 'highlighter', label: 'Highlighter', strokeWidth: 23, opacity: 0.5 },
+  { id: 'brush', label: 'Brush', strokeWidth: 28, opacity: 0.18 },
+];
+
+export const drawingColors: ReadonlyArray<{
+  id: DrawingColor;
+  label: string;
+  value: string;
+}> = [
+  { id: 'charcoal', label: 'Black', value: '#444949' },
+  { id: 'cyan', label: 'Blue', value: '#51b5c6' },
+  { id: 'green', label: 'Green', value: '#74a94a' },
+  { id: 'white', label: 'White', value: '#ffffff' },
+  { id: 'yellow', label: 'Yellow', value: '#f4bc2e' },
+  { id: 'red', label: 'Red', value: '#dd4f44' },
+];
+
+export function getDrawingStylePreset(style: DrawingStyle) {
+  return drawingStyles.find((option) => option.id === style) ?? drawingStyles[0];
+}
+
+export function getDrawingColorValue(color: DrawingColor) {
+  return (
+    drawingColors.find((option) => option.id === color)?.value ??
+    drawingColors[0].value
+  );
+}
 
 export const stickyNoteColors: ReadonlyArray<{
   id: StickyNoteColor;

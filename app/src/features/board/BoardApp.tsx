@@ -24,6 +24,11 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 
+import { DrawingMenu } from './components/DrawingMenu';
+import {
+  InkStrokePath,
+  type InkStrokeHandle,
+} from './components/InkStroke';
 import { SlidePreview } from './components/SlidePreview';
 import { StickyNoteContent } from './components/StickyNoteContent';
 import { ToolButton } from './components/ToolButton';
@@ -46,17 +51,24 @@ import type {
   CanvasImage,
   CanvasItem,
   CanvasStickyNote,
+  CanvasStroke,
   DeckHistoryState,
+  DrawingColor,
+  DrawingStyle,
   Gesture,
   HistoryState,
+  Point,
   ResizeCorner,
   SlideDeck,
+  StrokePoint,
   StickyNoteColor,
   Tool,
+  TransformableCanvasItem,
 } from './types';
 import {
   addDeckToPast,
   addToPast,
+  appendStrokePoints,
   boardPoint,
   clamp,
   decodeImageFile,
@@ -78,6 +90,15 @@ type PendingStickyNote = {
   note: CanvasStickyNote;
   slideId: string;
   discarding: boolean;
+};
+
+type InkGesture = {
+  pointerId: number;
+  slideId: string;
+  boardRect: BoardRect;
+  stroke: CanvasStroke;
+  lastSample: Point & { time: number };
+  velocity: number | null;
 };
 
 function moveColorChoiceFocus(event: ReactKeyboardEvent<HTMLButtonElement>) {
@@ -135,6 +156,10 @@ function restoreGestureStart(items: CanvasItem[], gesture: Gesture) {
 
 export default function BoardApp() {
   const [selectedToolId, setSelectedToolId] = useState<Tool['id']>('select');
+  const [drawingStyle, setDrawingStyle] = useState<DrawingStyle>('pen');
+  const [drawingColor, setDrawingColor] = useState<DrawingColor>('charcoal');
+  const [isDrawingMenuOpen, setIsDrawingMenuOpen] = useState(false);
+  const [pendingStroke, setPendingStroke] = useState<CanvasStroke | null>(null);
   const [deckHistory, setDeckHistory] = useState<DeckHistoryState>(() => ({
     past: [],
     present: {
@@ -164,14 +189,45 @@ export default function BoardApp() {
   const activeThumbnailRef = useRef<HTMLButtonElement>(null);
   const slideMenuButtonRef = useRef<HTMLButtonElement>(null);
   const frameCounterRef = useRef<HTMLButtonElement>(null);
+  const penToolButtonRef = useRef<HTMLButtonElement>(null);
+  const drawingSurfaceRef = useRef<HTMLDivElement>(null);
+  const activeInkRendererRef = useRef<InkStrokeHandle>(null);
+  const inkRenderFrameRef = useRef<number | null>(null);
   const activeColorChoiceRef = useRef<HTMLButtonElement>(null);
   const focusColorPickerOnOpenRef = useRef(false);
   const finishingStickyNoteIdRef = useRef<string | null>(null);
   const stickyNoteDiscardTimersRef = useRef<number[]>([]);
   const gestureRef = useRef<Gesture | null>(null);
+  const inkGestureRef = useRef<InkGesture | null>(null);
   const activeSlideIdRef = useRef(deck.activeSlideId);
   const wasSlideOverviewOpenRef = useRef(false);
   const overviewReturnFocusRef = useRef<'counter' | 'canvas'>('counter');
+
+  const closeDrawingMenu = useCallback((restoreFocus = false) => {
+    setIsDrawingMenuOpen(false);
+    if (!restoreFocus) return;
+
+    window.requestAnimationFrame(() => {
+      penToolButtonRef.current?.focus({ preventScroll: true });
+    });
+  }, []);
+
+  const cancelActiveInk = useCallback(() => {
+    const gesture = inkGestureRef.current;
+    inkGestureRef.current = null;
+    setPendingStroke(null);
+    if (inkRenderFrameRef.current !== null) {
+      window.cancelAnimationFrame(inkRenderFrameRef.current);
+      inkRenderFrameRef.current = null;
+    }
+
+    if (
+      gesture &&
+      drawingSurfaceRef.current?.hasPointerCapture(gesture.pointerId)
+    ) {
+      drawingSurfaceRef.current.releasePointerCapture(gesture.pointerId);
+    }
+  }, []);
 
   const closeSlideMenu = useCallback((restoreFocus = false) => {
     setOpenSlideMenuId(null);
@@ -275,6 +331,8 @@ export default function BoardApp() {
   );
 
   const undo = useCallback(() => {
+    cancelActiveInk();
+    closeDrawingMenu();
     cancelActiveGesture();
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
@@ -292,9 +350,17 @@ export default function BoardApp() {
         future: [current.present, ...current.future].slice(0, HISTORY_LIMIT),
       };
     });
-  }, [cancelActiveGesture, closeSlideMenu, openSlideMenuId]);
+  }, [
+    cancelActiveGesture,
+    cancelActiveInk,
+    closeDrawingMenu,
+    closeSlideMenu,
+    openSlideMenuId,
+  ]);
 
   const redo = useCallback(() => {
+    cancelActiveInk();
+    closeDrawingMenu();
     cancelActiveGesture();
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
@@ -312,10 +378,18 @@ export default function BoardApp() {
         future: current.future.slice(1),
       };
     });
-  }, [cancelActiveGesture, closeSlideMenu, openSlideMenuId]);
+  }, [
+    cancelActiveGesture,
+    cancelActiveInk,
+    closeDrawingMenu,
+    closeSlideMenu,
+    openSlideMenuId,
+  ]);
 
   const deleteSlide = useCallback(
     (slideId: string) => {
+      cancelActiveInk();
+      closeDrawingMenu();
       cancelActiveGesture();
       setSelectedItemId(null);
       setOpenItemMenuId(null);
@@ -346,11 +420,13 @@ export default function BoardApp() {
         };
       });
     },
-    [cancelActiveGesture, closeSlideMenu],
+    [cancelActiveGesture, cancelActiveInk, closeDrawingMenu, closeSlideMenu],
   );
 
   const navigateToAdjacentSlide = useCallback(
     (direction: -1 | 1) => {
+      cancelActiveInk();
+      closeDrawingMenu();
       cancelActiveGesture();
       setSelectedItemId(null);
       setOpenItemMenuId(null);
@@ -368,7 +444,13 @@ export default function BoardApp() {
           : current;
       });
     },
-    [cancelActiveGesture, closeSlideMenu, setDeck],
+    [
+      cancelActiveGesture,
+      cancelActiveInk,
+      closeDrawingMenu,
+      closeSlideMenu,
+      setDeck,
+    ],
   );
 
   const deleteItem = useCallback(
@@ -394,7 +476,7 @@ export default function BoardApp() {
     (itemId: string, degrees: number) => {
       commit((items) =>
         items.map((item) =>
-          item.id === itemId
+          item.id === itemId && item.kind !== 'stroke'
             ? { ...item, rotation: normalizeRotation(item.rotation + degrees) }
             : item,
         ),
@@ -578,15 +660,38 @@ export default function BoardApp() {
 
   const selectTool = useCallback(
     (tool: Tool) => {
+      cancelActiveInk();
       finishStickyNoteEdit();
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+
+      if (tool.id === 'pen') {
+        cancelActiveGesture();
+        setSelectedItemId(null);
+        setSelectedToolId('pen');
+        setIsDrawingMenuOpen((current) =>
+          selectedToolId === 'pen' ? !current : true,
+        );
+        return;
+      }
+
+      closeDrawingMenu();
       setSelectedToolId(tool.id);
     },
-    [finishStickyNoteEdit],
+    [
+      cancelActiveGesture,
+      cancelActiveInk,
+      closeDrawingMenu,
+      finishStickyNoteEdit,
+      selectedToolId,
+    ],
   );
 
   const pasteImages = useCallback(
     async (files: File[]) => {
       const targetSlideId = activeSlideIdRef.current;
+      cancelActiveInk();
+      closeDrawingMenu();
       cancelActiveGesture();
       setSelectedItemId(null);
       setOpenItemMenuId(null);
@@ -640,8 +745,11 @@ export default function BoardApp() {
                 : currentItem,
             )
           : targetSlide.history.present;
+        const existingObjectCount = targetSlide.history.present.filter(
+          (item) => item.kind !== 'stroke',
+        ).length;
         const positioned = additions.map((image, index) => {
-          const offset = ((targetSlide.history.present.length + index) % 5) * 22;
+          const offset = ((existingObjectCount + index) % 5) * 22;
           return {
             ...image,
             x: clamp(
@@ -701,7 +809,7 @@ export default function BoardApp() {
         );
       }
     },
-    [cancelActiveGesture],
+    [cancelActiveGesture, cancelActiveInk, closeDrawingMenu],
   );
 
   useEffect(() => {
@@ -731,6 +839,18 @@ export default function BoardApp() {
       if (isTextEntry(event.target)) return;
 
       if (event.key === 'Escape') {
+        if (inkGestureRef.current) {
+          event.preventDefault();
+          cancelActiveInk();
+          return;
+        }
+
+        if (isDrawingMenuOpen) {
+          event.preventDefault();
+          closeDrawingMenu(true);
+          return;
+        }
+
         if (openSlideMenuId) {
           event.preventDefault();
           closeSlideMenu(true);
@@ -759,6 +879,8 @@ export default function BoardApp() {
         redo();
         return;
       }
+
+      if (isDrawingMenuOpen) return;
 
       const isHorizontalArrow =
         event.key === 'ArrowLeft' || event.key === 'ArrowRight';
@@ -801,11 +923,14 @@ export default function BoardApp() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     closeSlideOverview,
+    closeDrawingMenu,
     closeSlideMenu,
+    cancelActiveInk,
     deck.activeSlideId,
     deleteItem,
     deleteSlide,
     isSlideOverviewOpen,
+    isDrawingMenuOpen,
     navigateToAdjacentSlide,
     openItemMenuId,
     openSlideMenuId,
@@ -825,9 +950,25 @@ export default function BoardApp() {
       stickyNoteDiscardTimersRef.current.forEach((timer) =>
         window.clearTimeout(timer),
       );
+      if (inkRenderFrameRef.current !== null) {
+        window.cancelAnimationFrame(inkRenderFrameRef.current);
+      }
     },
     [],
   );
+
+  useEffect(() => {
+    if (!isDrawingMenuOpen) return;
+
+    const closeMenu = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest('[data-drawing-menu]')) return;
+      closeDrawingMenu();
+    };
+
+    document.addEventListener('pointerdown', closeMenu, true);
+    return () => document.removeEventListener('pointerdown', closeMenu, true);
+  }, [closeDrawingMenu, isDrawingMenuOpen]);
 
   useEffect(() => {
     if (!openItemMenuId) return;
@@ -885,7 +1026,7 @@ export default function BoardApp() {
 
   const startGesture = (
     event: ReactPointerEvent<HTMLElement>,
-    item: CanvasItem,
+    item: TransformableCanvasItem,
     kind: Gesture['kind'],
     corner?: ResizeCorner,
   ) => {
@@ -909,8 +1050,11 @@ export default function BoardApp() {
     const initialIndex = history.present.findIndex(
       (currentItem) => currentItem.id === itemAtStart.id,
     );
+    const lastObjectIndex = history.present.findLastIndex(
+      (currentItem) => currentItem.kind !== 'stroke',
+    );
     const broughtToFront =
-      initialIndex >= 0 && initialIndex !== history.present.length - 1;
+      initialIndex >= 0 && initialIndex !== lastObjectIndex;
 
     gestureRef.current = {
       kind,
@@ -1061,7 +1205,7 @@ export default function BoardApp() {
               history: {
                 past: addToPast(slide.history.past, beforeItems),
                 present: slide.history.present.map((item) =>
-                  item.id === gesture.itemId
+                  item.id === gesture.itemId && item.kind !== 'stroke'
                     ? { ...item, rotation: normalizeRotation(item.rotation) }
                     : item,
                 ),
@@ -1079,7 +1223,163 @@ export default function BoardApp() {
     });
   };
 
+  const appendPointerEventToInk = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const gesture = inkGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return null;
+
+    const coalescedEvents = event.nativeEvent.getCoalescedEvents?.() ?? [];
+    const samples =
+      coalescedEvents.length > 0
+        ? coalescedEvents
+        : [event.nativeEvent];
+    const candidates: StrokePoint[] = samples.map((sample) => {
+      const point = boardPoint(
+        sample.clientX,
+        sample.clientY,
+        gesture.boardRect,
+      );
+      const rawTime = Number.isFinite(sample.timeStamp)
+        ? sample.timeStamp
+        : gesture.lastSample.time + 16.67;
+      const sampleTime =
+        rawTime > gesture.lastSample.time
+          ? rawTime
+          : gesture.lastSample.time + 1;
+      const elapsed = sampleTime - gesture.lastSample.time;
+      const horizontalScale = gesture.boardRect.width / BOARD_WIDTH;
+      const verticalScale = gesture.boardRect.height / BOARD_HEIGHT;
+      const distance = Math.hypot(
+        (point.x - gesture.lastSample.x) * horizontalScale,
+        (point.y - gesture.lastSample.y) * verticalScale,
+      );
+      const rawVelocity = distance / elapsed;
+      if (gesture.velocity === null) {
+        if (distance > 0.01) gesture.velocity = rawVelocity;
+      } else {
+        const blend = 1 - Math.exp(-elapsed / 28);
+        gesture.velocity += (rawVelocity - gesture.velocity) * blend;
+      }
+      gesture.lastSample = { ...point, time: sampleTime };
+
+      return { ...point, velocity: gesture.velocity ?? 0 };
+    });
+    const appended = appendStrokePoints(gesture.stroke.points, candidates);
+
+    if (appended && inkRenderFrameRef.current === null) {
+      inkRenderFrameRef.current = window.requestAnimationFrame(() => {
+        inkRenderFrameRef.current = null;
+        if (!inkGestureRef.current) return;
+        activeInkRendererRef.current?.redraw();
+      });
+    }
+
+    return gesture;
+  };
+
+  const startInkStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (
+      event.button !== 0 ||
+      !event.isPrimary ||
+      inkGestureRef.current
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    finishStickyNoteEdit();
+    cancelActiveGesture();
+    closeDrawingMenu();
+    setSelectedItemId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const boardRect: BoardRect = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const point = boardPoint(event.clientX, event.clientY, boardRect);
+    const sampleTime = Number.isFinite(event.nativeEvent.timeStamp)
+      ? event.nativeEvent.timeStamp
+      : 0;
+    const stroke: CanvasStroke = {
+      kind: 'stroke',
+      id: crypto.randomUUID(),
+      style: drawingStyle,
+      color: drawingColor,
+      points: [
+        {
+          x: clamp(point.x, 0, BOARD_WIDTH),
+          y: clamp(point.y, 0, BOARD_HEIGHT),
+          velocity: 0,
+        },
+      ],
+    };
+
+    inkGestureRef.current = {
+      pointerId: event.pointerId,
+      slideId: deck.activeSlideId,
+      boardRect,
+      stroke,
+      lastSample: {
+        x: clamp(point.x, 0, BOARD_WIDTH),
+        y: clamp(point.y, 0, BOARD_HEIGHT),
+        time: sampleTime,
+      },
+      velocity: null,
+    };
+    setPendingStroke(stroke);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const moveInkStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!inkGestureRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    appendPointerEventToInk(event);
+  };
+
+  const finishInkStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = appendPointerEventToInk(event);
+    if (!gesture) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    if (inkRenderFrameRef.current !== null) {
+      window.cancelAnimationFrame(inkRenderFrameRef.current);
+      inkRenderFrameRef.current = null;
+    }
+    inkGestureRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setPendingStroke(null);
+
+    if (activeSlideIdRef.current !== gesture.slideId) return;
+    const completedStroke = {
+      ...gesture.stroke,
+      points: [...gesture.stroke.points],
+    };
+    commit((currentItems) => [...currentItems, completedStroke]);
+  };
+
+  const cancelInkStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = inkGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    cancelActiveInk();
+  };
+
   const clearCanvasSelection = useCallback(() => {
+    cancelActiveInk();
+    closeDrawingMenu();
     cancelActiveGesture();
     setSelectedItemId(null);
     setOpenItemMenuId(null);
@@ -1087,7 +1387,12 @@ export default function BoardApp() {
     setStickyNoteEdit(null);
     setPendingStickyNote(null);
     closeSlideMenu();
-  }, [cancelActiveGesture, closeSlideMenu]);
+  }, [
+    cancelActiveGesture,
+    cancelActiveInk,
+    closeDrawingMenu,
+    closeSlideMenu,
+  ]);
 
   const selectSlide = useCallback(
     (slideId: string) => {
@@ -1235,6 +1540,8 @@ export default function BoardApp() {
     pendingStickyNote?.slideId === deck.activeSlideId
       ? [...history.present, pendingStickyNote.note]
       : history.present;
+  const strokes = items.filter((item) => item.kind === 'stroke');
+  const canvasObjects = items.filter((item) => item.kind !== 'stroke');
 
   return (
     <main className="app-shell">
@@ -1496,10 +1803,10 @@ export default function BoardApp() {
           ref={boardRef}
           className={`board${
             selectedToolId === 'sticky-note' ? ' is-placing-sticky-note' : ''
-          }`}
+          }${selectedToolId === 'pen' ? ' is-drawing' : ''}`}
           role="region"
           tabIndex={0}
-          aria-label="Board. Add sticky notes or paste images, then drag items to move them."
+          aria-label="Board. Draw, add sticky notes, or paste images."
           onPointerDown={(event) => {
             if (event.currentTarget !== event.target) return;
             if (selectedToolId === 'sticky-note') {
@@ -1515,7 +1822,7 @@ export default function BoardApp() {
           onPointerUp={finishGesture}
           onPointerCancel={finishGesture}
         >
-          {items.map((item) => {
+          {canvasObjects.map((item) => {
             const isPending = pendingStickyNote?.note.id === item.id;
             const isDiscarding =
               isPending && pendingStickyNote?.discarding === true;
@@ -1818,6 +2125,45 @@ export default function BoardApp() {
             );
           })}
 
+          {strokes.length > 0 ? (
+            <svg
+              className="completed-ink-layer"
+              viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`}
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              {strokes.map((stroke) => (
+                <InkStrokePath key={stroke.id} stroke={stroke} />
+              ))}
+            </svg>
+          ) : null}
+
+          {selectedToolId === 'pen' ? (
+            <div
+              ref={drawingSurfaceRef}
+              className="drawing-surface"
+              aria-hidden="true"
+              onPointerDown={startInkStroke}
+              onPointerMove={moveInkStroke}
+              onPointerUp={finishInkStroke}
+              onPointerCancel={cancelInkStroke}
+              onLostPointerCapture={cancelInkStroke}
+            >
+              <svg
+                viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`}
+                preserveAspectRatio="none"
+              >
+                {pendingStroke ? (
+                  <InkStrokePath
+                    ref={activeInkRendererRef}
+                    live
+                    stroke={pendingStroke}
+                  />
+                ) : null}
+              </svg>
+            </div>
+          ) : null}
+
           {notice ? (
             <div className="board-notice" role="status" aria-live="polite">
               {notice}
@@ -1831,14 +2177,35 @@ export default function BoardApp() {
         aria-label="Board tools"
         inert={isSlideOverviewOpen}
       >
-        {tools.map((tool) => (
-          <ToolButton
-            key={tool.id}
-            tool={tool}
-            selected={selectedToolId === tool.id}
-            onSelect={() => selectTool(tool)}
-          />
-        ))}
+        {tools.map((tool) =>
+          tool.id === 'pen' ? (
+            <div key={tool.id} className="drawing-menu-anchor" data-drawing-menu>
+              <ToolButton
+                buttonRef={penToolButtonRef}
+                controls="drawing-options"
+                expanded={isDrawingMenuOpen}
+                tool={tool}
+                selected={selectedToolId === tool.id}
+                onSelect={() => selectTool(tool)}
+              />
+              {isDrawingMenuOpen ? (
+                <DrawingMenu
+                  style={drawingStyle}
+                  color={drawingColor}
+                  onStyleChange={setDrawingStyle}
+                  onColorChange={setDrawingColor}
+                />
+              ) : null}
+            </div>
+          ) : (
+            <ToolButton
+              key={tool.id}
+              tool={tool}
+              selected={selectedToolId === tool.id}
+              onSelect={() => selectTool(tool)}
+            />
+          ),
+        )}
       </nav>
     </main>
   );

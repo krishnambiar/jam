@@ -1,22 +1,36 @@
 import { ChevronRight } from 'lucide-react';
+import type { Ref } from 'react';
 
 import type { Tool } from '../types';
 
 type ToolButtonProps = {
+  buttonRef?: Ref<HTMLButtonElement>;
+  controls?: string;
+  expanded?: boolean;
   tool: Tool;
   selected: boolean;
   onSelect: () => void;
 };
 
-export function ToolButton({ tool, selected, onSelect }: ToolButtonProps) {
+export function ToolButton({
+  buttonRef,
+  controls,
+  expanded,
+  tool,
+  selected,
+  onSelect,
+}: ToolButtonProps) {
   const Icon = tool.icon;
 
   return (
     <button
+      ref={buttonRef}
       type="button"
       className={`tool-button${selected ? ' is-selected' : ''}`}
       aria-label={tool.label}
       aria-pressed={selected}
+      aria-expanded={expanded}
+      aria-controls={controls}
       onClick={onSelect}
     >
       {Icon ? (

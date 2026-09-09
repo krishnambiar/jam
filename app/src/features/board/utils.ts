@@ -11,6 +11,7 @@ import type {
   Point,
   ResizeCorner,
   SlideDeck,
+  StrokePoint,
 } from './types';
 
 export function addToPast(past: CanvasItem[][], snapshot: CanvasItem[]) {
@@ -30,6 +31,60 @@ export function boardPoint(
     x: ((clientX - rect.left) / rect.width) * BOARD_WIDTH,
     y: ((clientY - rect.top) / rect.height) * BOARD_HEIGHT,
   };
+}
+
+export function appendStrokePoints(
+  points: StrokePoint[],
+  candidates: StrokePoint[],
+  minimumDistance = 0.55,
+) {
+  let appended = false;
+  let previous = points.at(-1);
+  const minimumDistanceSquared = minimumDistance * minimumDistance;
+
+  for (const candidate of candidates) {
+    if (previous) {
+      const deltaX = candidate.x - previous.x;
+      const deltaY = candidate.y - previous.y;
+      if (deltaX * deltaX + deltaY * deltaY < minimumDistanceSquared) continue;
+    }
+
+    points.push(candidate);
+    previous = candidate;
+    appended = true;
+  }
+
+  return appended;
+}
+
+function pathNumber(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+export function strokePath(points: readonly Point[]) {
+  if (points.length === 0) return '';
+
+  const first = points[0];
+  if (points.length === 1) {
+    return `M ${pathNumber(first.x)} ${pathNumber(first.y)} l 0.01 0`;
+  }
+  if (points.length === 2) {
+    const last = points[1];
+    return `M ${pathNumber(first.x)} ${pathNumber(first.y)} L ${pathNumber(last.x)} ${pathNumber(last.y)}`;
+  }
+
+  const commands = [`M ${pathNumber(first.x)} ${pathNumber(first.y)}`];
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const point = points[index];
+    const following = points[index + 1];
+    commands.push(
+      `Q ${pathNumber(point.x)} ${pathNumber(point.y)} ${pathNumber((point.x + following.x) / 2)} ${pathNumber((point.y + following.y) / 2)}`,
+    );
+  }
+
+  const last = points.at(-1)!;
+  commands.push(`L ${pathNumber(last.x)} ${pathNumber(last.y)}`);
+  return commands.join(' ');
 }
 
 function rotateVector(point: Point, degrees: number): Point {

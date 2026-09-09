@@ -1,5 +1,6 @@
 import { BOARD_HEIGHT, BOARD_WIDTH } from '../constants';
 import type { CanvasItem } from '../types';
+import { InkStrokePath } from './InkStroke';
 import { StickyNoteContent } from './StickyNoteContent';
 
 type SlidePreviewProps = {
@@ -7,9 +8,12 @@ type SlidePreviewProps = {
 };
 
 export function SlidePreview({ items }: SlidePreviewProps) {
+  const strokes = items.filter((item) => item.kind === 'stroke');
+  const objects = items.filter((item) => item.kind !== 'stroke');
+
   return (
     <span className="slide-preview-canvas" aria-hidden="true">
-      {items.map((item) => (
+      {objects.map((item) => (
         <span
           key={item.id}
           className="slide-preview-item"
@@ -28,6 +32,17 @@ export function SlidePreview({ items }: SlidePreviewProps) {
           )}
         </span>
       ))}
+      {strokes.length > 0 ? (
+        <svg
+          className="slide-preview-ink"
+          viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`}
+          preserveAspectRatio="none"
+        >
+          {strokes.map((stroke) => (
+            <InkStrokePath key={stroke.id} stroke={stroke} />
+          ))}
+        </svg>
+      ) : null}
     </span>
   );
 }

@@ -43,7 +43,36 @@ export type CanvasStickyNote = CanvasTransform & {
   color: StickyNoteColor;
 };
 
-export type CanvasItem = CanvasImage | CanvasStickyNote;
+export type DrawingStyle = 'pen' | 'marker' | 'highlighter' | 'brush';
+
+export type DrawingColor =
+  | 'charcoal'
+  | 'cyan'
+  | 'green'
+  | 'white'
+  | 'yellow'
+  | 'red';
+
+export type Point = {
+  x: number;
+  y: number;
+};
+
+export type StrokePoint = Point & {
+  velocity: number;
+};
+
+export type CanvasStroke = {
+  kind: 'stroke';
+  id: string;
+  style: DrawingStyle;
+  color: DrawingColor;
+  points: StrokePoint[];
+};
+
+export type TransformableCanvasItem = CanvasImage | CanvasStickyNote;
+
+export type CanvasItem = TransformableCanvasItem | CanvasStroke;
 
 export type HistoryState = {
   past: CanvasItem[][];
@@ -74,11 +103,6 @@ export type BoardRect = {
   height: number;
 };
 
-export type Point = {
-  x: number;
-  y: number;
-};
-
 export type ResizeCorner = 'nw' | 'ne' | 'sw' | 'se';
 
 export type Gesture = {
@@ -86,7 +110,7 @@ export type Gesture = {
   pointerId: number;
   slideId: string;
   itemId: string;
-  initialItem: CanvasItem;
+  initialItem: TransformableCanvasItem;
   initialIndex: number;
   broughtToFront: boolean;
   boardRect: BoardRect;
