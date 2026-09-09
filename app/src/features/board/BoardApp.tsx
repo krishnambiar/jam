@@ -3,6 +3,8 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  Copy,
+  CopyPlus,
   MoreVertical,
   Plus,
   Redo2,
@@ -30,6 +32,8 @@ import {
   type InkStrokeHandle,
 } from './components/InkStroke';
 import { SlidePreview } from './components/SlidePreview';
+import { ShapeContent } from './components/ShapeContent';
+import { ShapeMenu } from './components/ShapeMenu';
 import { StickyNoteContent } from './components/StickyNoteContent';
 import { ToolButton } from './components/ToolButton';
 import {
@@ -39,10 +43,14 @@ import {
   HISTORY_LIMIT,
   INITIAL_SLIDE_ID,
   MAX_SLIDES,
+  MIN_SHAPE_DRAW_SIZE,
   STICKY_NOTE_SIZE,
   createEmptySlide,
   getStickyNoteColorValue,
+  getShapeColorValue,
+  getShapeOption,
   resizeCorners,
+  shapeColors,
   stickyNoteColors,
   tools,
 } from './constants';
@@ -50,6 +58,7 @@ import type {
   BoardRect,
   CanvasImage,
   CanvasItem,
+  CanvasShape,
   CanvasStickyNote,
   CanvasStroke,
   DeckHistoryState,
@@ -61,6 +70,8 @@ import type {
   HistoryState,
   Point,
   ResizeCorner,
+  ShapeColor,
+  ShapeType,
   SlideDeck,
   StrokePoint,
   StickyNoteColor,
@@ -77,6 +88,7 @@ import {
   decodeImageFile,
   eraserRadiusForVelocity,
   fittedImageSize,
+  getInkRuns,
   isTextEntry,
   normalizeRotation,
   resizedItem,
@@ -122,6 +134,67 @@ type PendingErase = {
   slideId: string;
   items: CanvasItem[];
 };
+
+type ShapeGesture = {
+  pointerId: number;
+  slideId: string;
+  boardRect: BoardRect;
+  startPoint: Point;
+  shape: CanvasShape;
+};
+
+type PendingShape = {
+  slideId: string;
+  shape: CanvasShape;
+};
+
+type BoardSize = {
+  width: number;
+  height: number;
+};
+
+type RotationHandleSide = 'top' | 'bottom';
+
+const ITEM_CLIPBOARD_TYPE = 'application/x-untitled-jam-item';
+
+function clipboardLabel(item: TransformableCanvasItem) {
+  if (item.kind === 'shape') {
+    return `Untitled Jam ${getShapeOption(item.shape).label} shape`;
+  }
+  if (item.kind === 'sticky-note') return 'Untitled Jam sticky note';
+  return `Untitled Jam image: ${item.name}`;
+}
+
+function isClipboardItem(value: unknown): value is TransformableCanvasItem {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Record<string, unknown>;
+  const hasTransform =
+    typeof item.id === 'string' &&
+    typeof item.x === 'number' &&
+    typeof item.y === 'number' &&
+    typeof item.width === 'number' &&
+    typeof item.height === 'number' &&
+    typeof item.rotation === 'number';
+  if (!hasTransform) return false;
+
+  if (item.kind === 'shape') {
+    return (
+      shapeColors.some((color) => color.id === item.color) &&
+      getShapeOption(item.shape as ShapeType).id === item.shape
+    );
+  }
+  if (item.kind === 'sticky-note') {
+    return (
+      typeof item.text === 'string' &&
+      stickyNoteColors.some((color) => color.id === item.color)
+    );
+  }
+  return (
+    item.kind === 'image' &&
+    typeof item.src === 'string' &&
+    typeof item.name === 'string'
+  );
+}
 
 function moveColorChoiceFocus(event: ReactKeyboardEvent<HTMLButtonElement>) {
   const direction =
@@ -189,12 +262,142 @@ function eraserRadiusInBoardUnits(
   return eraserRadiusForVelocity(velocity) / screenScale;
 }
 
+function copiedItemPosition(
+  source: TransformableCanvasItem,
+  items: CanvasItem[],
+) {
+  const extents = rotatedItemExtents(source);
+  const directions = [
+    [1, 1],
+    [-1, 1],
+    [1, -1],
+    [-1, -1],
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const;
+
+  for (let step = 1; step <= 8; step += 1) {
+    for (const [horizontal, vertical] of directions) {
+      const x = clamp(
+        source.x + horizontal * step * 32,
+        extents.horizontal,
+        BOARD_WIDTH - extents.horizontal,
+      );
+      const y = clamp(
+        source.y + vertical * step * 32,
+        extents.vertical,
+        BOARD_HEIGHT - extents.vertical,
+      );
+      if (Math.abs(x - source.x) < 0.5 && Math.abs(y - source.y) < 0.5) {
+        continue;
+      }
+
+      const occupied = items.some(
+        (item) =>
+          item.kind !== 'stroke' &&
+          Math.abs(item.x - x) < 0.5 &&
+          Math.abs(item.y - y) < 0.5,
+      );
+      if (!occupied) return { x, y };
+    }
+  }
+
+  return { x: source.x, y: source.y };
+}
+
+function rotationHandlePlacement(
+  item: TransformableCanvasItem,
+  boardSize: BoardSize,
+  preferredSide?: RotationHandleSide,
+) {
+  const radians = (item.rotation * Math.PI) / 180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  const horizontalScale = Math.max(0.001, boardSize.width / BOARD_WIDTH);
+  const verticalScale = Math.max(0.001, boardSize.height / BOARD_HEIGHT);
+  const distanceFromCenter = item.height * verticalScale / 2 + 22;
+  const controlExtent = 16;
+  const center = {
+    x: item.x * horizontalScale,
+    y: item.y * verticalScale,
+  };
+
+  const candidates = [
+    {
+      side: 'top' as const,
+      className: '',
+      point: {
+        x: center.x + sine * distanceFromCenter,
+        y: center.y - cosine * distanceFromCenter,
+      },
+    },
+    {
+      side: 'bottom' as const,
+      className: ' is-below',
+      point: {
+        x: center.x - sine * distanceFromCenter,
+        y: center.y + cosine * distanceFromCenter,
+      },
+    },
+  ].map((candidate) => {
+    const clampedPoint = {
+      x: clamp(
+        candidate.point.x,
+        controlExtent,
+        boardSize.width - controlExtent,
+      ),
+      y: clamp(
+        candidate.point.y,
+        controlExtent,
+        boardSize.height - controlExtent,
+      ),
+    };
+    const screenShift = {
+      x: clampedPoint.x - candidate.point.x,
+      y: clampedPoint.y - candidate.point.y,
+    };
+
+    return {
+      ...candidate,
+      distance: Math.hypot(screenShift.x, screenShift.y),
+      localShift: {
+        x: screenShift.x * cosine + screenShift.y * sine,
+        y: -screenShift.x * sine + screenShift.y * cosine,
+      },
+    };
+  });
+  const placement = preferredSide
+    ? candidates.find((candidate) => candidate.side === preferredSide)!
+    : candidates[1].distance < candidates[0].distance
+      ? candidates[1]
+      : candidates[0];
+  const shifted = placement.distance > 0.5;
+
+  return {
+    className: `${placement.className}${shifted ? ' is-shifted' : ''}`,
+    style: {
+      '--rotation-handle-shift-x': `${placement.localShift.x}px`,
+      '--rotation-handle-shift-y': `${placement.localShift.y}px`,
+    } as CSSProperties,
+  };
+}
+
 export default function BoardApp() {
   const [selectedToolId, setSelectedToolId] = useState<Tool['id']>('select');
   const [drawingStyle, setDrawingStyle] = useState<DrawingStyle>('pen');
   const [drawingColor, setDrawingColor] = useState<DrawingColor>('charcoal');
   const [isDrawingMenuOpen, setIsDrawingMenuOpen] = useState(false);
+  const [activeShape, setActiveShape] = useState<ShapeType>('circle');
+  const [activeShapeColor, setActiveShapeColor] =
+    useState<ShapeColor>('charcoal');
+  const [isShapeMenuOpen, setIsShapeMenuOpen] = useState(false);
+  const [focusShapeMenuSelection, setFocusShapeMenuSelection] = useState(false);
+  const [rotationHandleLock, setRotationHandleLock] =
+    useState<{ itemId: string; side: RotationHandleSide } | null>(null);
   const [pendingStroke, setPendingStroke] = useState<CanvasStroke | null>(null);
+  const [pendingShape, setPendingShape] = useState<PendingShape | null>(null);
   const [pendingErase, setPendingErase] = useState<PendingErase | null>(null);
   const [eraserPreview, setEraserPreview] = useState<EraserPoint | null>(null);
   const [deckHistory, setDeckHistory] = useState<DeckHistoryState>(() => ({
@@ -221,12 +424,17 @@ export default function BoardApp() {
     useState<PendingStickyNote | null>(null);
   const [openSlideMenuId, setOpenSlideMenuId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [boardSize, setBoardSize] = useState<BoardSize>({
+    width: BOARD_WIDTH,
+    height: BOARD_HEIGHT,
+  });
   const boardRef = useRef<HTMLDivElement>(null);
   const overviewViewportRef = useRef<HTMLDivElement>(null);
   const activeThumbnailRef = useRef<HTMLButtonElement>(null);
   const slideMenuButtonRef = useRef<HTMLButtonElement>(null);
   const frameCounterRef = useRef<HTMLButtonElement>(null);
   const penToolButtonRef = useRef<HTMLButtonElement>(null);
+  const shapeToolButtonRef = useRef<HTMLButtonElement>(null);
   const drawingSurfaceRef = useRef<HTMLDivElement>(null);
   const activeInkRendererRef = useRef<InkStrokeHandle>(null);
   const inkRenderFrameRef = useRef<number | null>(null);
@@ -237,9 +445,32 @@ export default function BoardApp() {
   const gestureRef = useRef<Gesture | null>(null);
   const inkGestureRef = useRef<InkGesture | null>(null);
   const eraserGestureRef = useRef<EraserGesture | null>(null);
+  const shapeGestureRef = useRef<ShapeGesture | null>(null);
+  const copiedItemRef = useRef<TransformableCanvasItem | null>(null);
+  const copiedItemLabelRef = useRef<string | null>(null);
+  const copiedItemInternalOnlyRef = useRef(false);
+  const copyEventHandledRef = useRef(false);
   const activeSlideIdRef = useRef(deck.activeSlideId);
   const wasSlideOverviewOpenRef = useRef(false);
   const overviewReturnFocusRef = useRef<'counter' | 'canvas'>('counter');
+
+  useLayoutEffect(() => {
+    const board = boardRef.current;
+    if (!board) return;
+
+    const updateBoardSize = () => {
+      const next = { width: board.clientWidth, height: board.clientHeight };
+      setBoardSize((current) =>
+        current.width === next.width && current.height === next.height
+          ? current
+          : next,
+      );
+    };
+    const observer = new ResizeObserver(updateBoardSize);
+    updateBoardSize();
+    observer.observe(board);
+    return () => observer.disconnect();
+  }, []);
 
   const closeDrawingMenu = useCallback((restoreFocus = false) => {
     setIsDrawingMenuOpen(false);
@@ -247,6 +478,15 @@ export default function BoardApp() {
 
     window.requestAnimationFrame(() => {
       penToolButtonRef.current?.focus({ preventScroll: true });
+    });
+  }, []);
+
+  const closeShapeMenu = useCallback((restoreFocus = false) => {
+    setIsShapeMenuOpen(false);
+    if (!restoreFocus) return;
+
+    window.requestAnimationFrame(() => {
+      shapeToolButtonRef.current?.focus({ preventScroll: true });
     });
   }, []);
 
@@ -281,10 +521,24 @@ export default function BoardApp() {
     }
   }, []);
 
+  const cancelActiveShape = useCallback(() => {
+    const gesture = shapeGestureRef.current;
+    shapeGestureRef.current = null;
+    setPendingShape(null);
+
+    if (
+      gesture &&
+      drawingSurfaceRef.current?.hasPointerCapture(gesture.pointerId)
+    ) {
+      drawingSurfaceRef.current.releasePointerCapture(gesture.pointerId);
+    }
+  }, []);
+
   const cancelActiveMarking = useCallback(() => {
     cancelActiveInk();
     cancelActiveEraser();
-  }, [cancelActiveEraser, cancelActiveInk]);
+    cancelActiveShape();
+  }, [cancelActiveEraser, cancelActiveInk, cancelActiveShape]);
 
   const closeSlideMenu = useCallback((restoreFocus = false) => {
     setOpenSlideMenuId(null);
@@ -349,6 +603,7 @@ export default function BoardApp() {
   const cancelActiveGesture = useCallback(() => {
     const gesture = gestureRef.current;
     gestureRef.current = null;
+    setRotationHandleLock(null);
     if (!gesture || (!gesture.moved && !gesture.broughtToFront)) return;
 
     setDeck((current) => ({
@@ -390,6 +645,7 @@ export default function BoardApp() {
   const undo = useCallback(() => {
     cancelActiveMarking();
     closeDrawingMenu();
+    closeShapeMenu();
     cancelActiveGesture();
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
@@ -411,6 +667,7 @@ export default function BoardApp() {
     cancelActiveGesture,
     cancelActiveMarking,
     closeDrawingMenu,
+    closeShapeMenu,
     closeSlideMenu,
     openSlideMenuId,
   ]);
@@ -418,6 +675,7 @@ export default function BoardApp() {
   const redo = useCallback(() => {
     cancelActiveMarking();
     closeDrawingMenu();
+    closeShapeMenu();
     cancelActiveGesture();
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
@@ -439,6 +697,7 @@ export default function BoardApp() {
     cancelActiveGesture,
     cancelActiveMarking,
     closeDrawingMenu,
+    closeShapeMenu,
     closeSlideMenu,
     openSlideMenuId,
   ]);
@@ -447,6 +706,7 @@ export default function BoardApp() {
     (slideId: string) => {
       cancelActiveMarking();
       closeDrawingMenu();
+      closeShapeMenu();
       cancelActiveGesture();
       setSelectedItemId(null);
       setOpenItemMenuId(null);
@@ -477,13 +737,20 @@ export default function BoardApp() {
         };
       });
     },
-    [cancelActiveGesture, cancelActiveMarking, closeDrawingMenu, closeSlideMenu],
+    [
+      cancelActiveGesture,
+      cancelActiveMarking,
+      closeDrawingMenu,
+      closeShapeMenu,
+      closeSlideMenu,
+    ],
   );
 
   const navigateToAdjacentSlide = useCallback(
     (direction: -1 | 1) => {
       cancelActiveMarking();
       closeDrawingMenu();
+      closeShapeMenu();
       cancelActiveGesture();
       setSelectedItemId(null);
       setOpenItemMenuId(null);
@@ -505,6 +772,7 @@ export default function BoardApp() {
       cancelActiveGesture,
       cancelActiveMarking,
       closeDrawingMenu,
+      closeShapeMenu,
       closeSlideMenu,
       setDeck,
     ],
@@ -542,6 +810,77 @@ export default function BoardApp() {
     },
     [commit],
   );
+
+  const addCopiedItem = useCallback(
+    (source: TransformableCanvasItem, message: string) => {
+      cancelActiveMarking();
+      closeDrawingMenu();
+      closeShapeMenu();
+      const id = crypto.randomUUID();
+      commit((items) => {
+        const position = copiedItemPosition(source, items);
+        const copy = {
+          ...source,
+          id,
+          ...position,
+        } satisfies TransformableCanvasItem;
+        return [...items, copy];
+      });
+      setSelectedToolId('select');
+      setSelectedItemId(id);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setNotice(message);
+    },
+    [cancelActiveMarking, closeDrawingMenu, closeShapeMenu, commit],
+  );
+
+  const duplicateItem = useCallback(
+    (item: TransformableCanvasItem) => {
+      addCopiedItem(
+        item,
+        `${item.kind === 'shape' ? 'Shape' : 'Object'} duplicated.`,
+      );
+    },
+    [addCopiedItem],
+  );
+
+  const copyItem = useCallback((item: TransformableCanvasItem) => {
+    const label = clipboardLabel(item);
+    const internalCopy = { ...item } satisfies TransformableCanvasItem;
+    copiedItemRef.current = internalCopy;
+    copiedItemLabelRef.current = label;
+    copiedItemInternalOnlyRef.current = false;
+    setOpenItemMenuId(null);
+    copyEventHandledRef.current = false;
+
+    try {
+      document.execCommand('copy');
+    } catch {
+      // Fall through to the async clipboard or in-board clipboard.
+    }
+    if (copyEventHandledRef.current) return;
+
+    copiedItemInternalOnlyRef.current = true;
+    setNotice(
+      `${item.kind === 'shape' ? 'Shape' : 'Object'} copied in this board.`,
+    );
+    if (!navigator.clipboard?.writeText) {
+      return;
+    }
+
+    void navigator.clipboard.writeText(label).then(
+      () => {
+        if (copiedItemRef.current !== internalCopy) return;
+        copiedItemInternalOnlyRef.current = false;
+        setNotice(`${item.kind === 'shape' ? 'Shape' : 'Object'} copied.`);
+      },
+      () => {
+        if (copiedItemRef.current !== internalCopy) return;
+        // The board-local copy remains available while this page stays focused.
+      },
+    );
+  }, []);
 
   const discardPendingStickyNote = useCallback((itemId: string) => {
     setSelectedItemId((current) => (current === itemId ? null : current));
@@ -715,6 +1054,48 @@ export default function BoardApp() {
     [commit, pendingStickyNote],
   );
 
+  const changeShapeColor = useCallback(
+    (itemId: string, color: ShapeColor) => {
+      commit((items) => {
+        const shape = items.find((item) => item.id === itemId);
+        if (!shape || shape.kind !== 'shape' || shape.color === color) {
+          return items;
+        }
+
+        return items.map((item) =>
+          item.id === itemId && item.kind === 'shape'
+            ? { ...item, color }
+            : item,
+        );
+      });
+      setActiveShapeColor(color);
+      setOpenColorPickerId(null);
+    },
+    [commit],
+  );
+
+  const chooseShape = useCallback(
+    (shape: ShapeType) => {
+      cancelActiveMarking();
+      finishStickyNoteEdit();
+      cancelActiveGesture();
+      closeDrawingMenu();
+      setActiveShape(shape);
+      setSelectedToolId('shape');
+      setSelectedItemId(null);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      closeShapeMenu(true);
+    },
+    [
+      cancelActiveGesture,
+      cancelActiveMarking,
+      closeDrawingMenu,
+      closeShapeMenu,
+      finishStickyNoteEdit,
+    ],
+  );
+
   const selectTool = useCallback(
     (tool: Tool, toggleDrawingOptions = true) => {
       cancelActiveMarking();
@@ -726,6 +1107,7 @@ export default function BoardApp() {
         cancelActiveGesture();
         setSelectedItemId(null);
         setSelectedToolId(tool.id);
+        closeShapeMenu();
         if (tool.id === 'pen') {
           setIsDrawingMenuOpen((current) =>
             toggleDrawingOptions && selectedToolId === 'pen' ? !current : false,
@@ -736,13 +1118,30 @@ export default function BoardApp() {
         return;
       }
 
+      if (tool.id === 'shape') {
+        cancelActiveGesture();
+        setSelectedItemId(null);
+        setSelectedToolId('shape');
+        closeDrawingMenu();
+        setIsShapeMenuOpen((current) =>
+          toggleDrawingOptions
+            ? selectedToolId === 'shape'
+              ? !current
+              : true
+            : false,
+        );
+        return;
+      }
+
       closeDrawingMenu();
+      closeShapeMenu();
       setSelectedToolId(tool.id);
     },
     [
       cancelActiveGesture,
       cancelActiveMarking,
       closeDrawingMenu,
+      closeShapeMenu,
       finishStickyNoteEdit,
       selectedToolId,
     ],
@@ -753,6 +1152,7 @@ export default function BoardApp() {
       const targetSlideId = activeSlideIdRef.current;
       cancelActiveMarking();
       closeDrawingMenu();
+      closeShapeMenu();
       cancelActiveGesture();
       setSelectedItemId(null);
       setOpenItemMenuId(null);
@@ -870,13 +1270,60 @@ export default function BoardApp() {
         );
       }
     },
-    [cancelActiveGesture, cancelActiveMarking, closeDrawingMenu],
+    [
+      cancelActiveGesture,
+      cancelActiveMarking,
+      closeDrawingMenu,
+      closeShapeMenu,
+    ],
   );
 
   useEffect(() => {
+    const handleCopy = (event: ClipboardEvent) => {
+      if (isTextEntry(event.target) || !selectedItemId) {
+        copiedItemRef.current = null;
+        copiedItemLabelRef.current = null;
+        copiedItemInternalOnlyRef.current = false;
+        return;
+      }
+      const item = history.present.find(
+        (candidate): candidate is TransformableCanvasItem =>
+          candidate.id === selectedItemId && candidate.kind !== 'stroke',
+      );
+      if (!item || !event.clipboardData) return;
+
+      const label = clipboardLabel(item);
+      event.preventDefault();
+      event.clipboardData.setData(ITEM_CLIPBOARD_TYPE, JSON.stringify(item));
+      event.clipboardData.setData('text/plain', label);
+      copiedItemRef.current = { ...item };
+      copiedItemLabelRef.current = label;
+      copiedItemInternalOnlyRef.current = false;
+      copyEventHandledRef.current = true;
+      setNotice(`${item.kind === 'shape' ? 'Shape' : 'Object'} copied.`);
+    };
+
     const handlePaste = (event: ClipboardEvent) => {
       if (isTextEntry(event.target)) return;
 
+      const serializedItem = event.clipboardData?.getData(ITEM_CLIPBOARD_TYPE);
+      if (serializedItem) {
+        try {
+          const item: unknown = JSON.parse(serializedItem);
+          if (isClipboardItem(item)) {
+            event.preventDefault();
+            addCopiedItem(
+              item,
+              `${item.kind === 'shape' ? 'Shape' : 'Object'} pasted.`,
+            );
+            return;
+          }
+        } catch {
+          // Ignore malformed clipboard data and continue to supported files.
+        }
+      }
+
+      const clipboardText = event.clipboardData?.getData('text/plain');
       const itemFiles = Array.from(event.clipboardData?.items ?? [])
         .filter((item) => item.kind === 'file')
         .map((item) => item.getAsFile())
@@ -885,22 +1332,63 @@ export default function BoardApp() {
         itemFiles.length > 0
           ? itemFiles
           : Array.from(event.clipboardData?.files ?? []);
+      if (
+        copiedItemRef.current &&
+        (clipboardText === copiedItemLabelRef.current ||
+          (copiedItemInternalOnlyRef.current && files.length === 0))
+      ) {
+        event.preventDefault();
+        addCopiedItem(
+          copiedItemRef.current,
+          `${copiedItemRef.current.kind === 'shape' ? 'Shape' : 'Object'} pasted.`,
+        );
+        return;
+      }
 
       if (files.length === 0) return;
       event.preventDefault();
       void pasteImages(files);
     };
 
+    window.addEventListener('copy', handleCopy);
     window.addEventListener('paste', handlePaste);
-    return () => window.removeEventListener('paste', handlePaste);
-  }, [pasteImages]);
+    return () => {
+      window.removeEventListener('copy', handleCopy);
+      window.removeEventListener('paste', handlePaste);
+    };
+  }, [addCopiedItem, history.present, pasteImages, selectedItemId]);
+
+  useEffect(() => {
+    const clearInternalClipboardFallback = () => {
+      if (!copiedItemInternalOnlyRef.current) return;
+      copiedItemRef.current = null;
+      copiedItemLabelRef.current = null;
+      copiedItemInternalOnlyRef.current = false;
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        clearInternalClipboardFallback();
+      }
+    };
+
+    window.addEventListener('blur', clearInternalClipboardFallback);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('blur', clearInternalClipboardFallback);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isTextEntry(event.target)) return;
 
       if (event.key === 'Escape') {
-        if (inkGestureRef.current || eraserGestureRef.current) {
+        if (
+          inkGestureRef.current ||
+          eraserGestureRef.current ||
+          shapeGestureRef.current
+        ) {
           event.preventDefault();
           cancelActiveMarking();
           return;
@@ -909,6 +1397,12 @@ export default function BoardApp() {
         if (isDrawingMenuOpen) {
           event.preventDefault();
           closeDrawingMenu(true);
+          return;
+        }
+
+        if (isShapeMenuOpen) {
+          event.preventDefault();
+          closeShapeMenu(true);
           return;
         }
 
@@ -958,7 +1452,7 @@ export default function BoardApp() {
         }
       }
 
-      if (isDrawingMenuOpen) return;
+      if (isDrawingMenuOpen || isShapeMenuOpen) return;
 
       const isHorizontalArrow =
         event.key === 'ArrowLeft' || event.key === 'ArrowRight';
@@ -989,7 +1483,10 @@ export default function BoardApp() {
 
       if (isSlideOverviewOpen) return;
 
-      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedItemId) {
+      if (
+        (event.key === 'Delete' || event.key === 'Backspace') &&
+        selectedItemId
+      ) {
         event.preventDefault();
         deleteItem(selectedItemId);
         return;
@@ -1002,6 +1499,7 @@ export default function BoardApp() {
   }, [
     closeSlideOverview,
     closeDrawingMenu,
+    closeShapeMenu,
     closeSlideMenu,
     cancelActiveMarking,
     deck.activeSlideId,
@@ -1009,6 +1507,7 @@ export default function BoardApp() {
     deleteSlide,
     isSlideOverviewOpen,
     isDrawingMenuOpen,
+    isShapeMenuOpen,
     navigateToAdjacentSlide,
     openItemMenuId,
     openSlideMenuId,
@@ -1050,6 +1549,19 @@ export default function BoardApp() {
   }, [closeDrawingMenu, isDrawingMenuOpen]);
 
   useEffect(() => {
+    if (!isShapeMenuOpen) return;
+
+    const closeMenu = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest('[data-shape-menu]')) return;
+      closeShapeMenu();
+    };
+
+    document.addEventListener('pointerdown', closeMenu, true);
+    return () => document.removeEventListener('pointerdown', closeMenu, true);
+  }, [closeShapeMenu, isShapeMenuOpen]);
+
+  useEffect(() => {
     if (!openItemMenuId) return;
 
     const closeMenu = (event: PointerEvent) => {
@@ -1067,9 +1579,7 @@ export default function BoardApp() {
 
     const closeColorPicker = (event: PointerEvent) => {
       if (!(event.target instanceof Element)) return;
-      if (
-        event.target.closest(`[data-note-color-picker="${openColorPickerId}"]`)
-      ) {
+      if (event.target.closest(`[data-color-picker="${openColorPickerId}"]`)) {
         return;
       }
       setOpenColorPickerId(null);
@@ -1129,11 +1639,19 @@ export default function BoardApp() {
     const initialIndex = history.present.findIndex(
       (currentItem) => currentItem.id === itemAtStart.id,
     );
-    const lastObjectIndex = history.present.findLastIndex(
-      (currentItem) => currentItem.kind !== 'stroke',
-    );
+    const lastItemIndex = history.present.length - 1;
     const broughtToFront =
-      initialIndex >= 0 && initialIndex !== lastObjectIndex;
+      initialIndex >= 0 && initialIndex !== lastItemIndex;
+    setRotationHandleLock(
+      kind === 'rotate'
+        ? {
+            itemId: itemAtStart.id,
+            side: event.currentTarget.classList.contains('is-below')
+              ? 'bottom'
+              : 'top',
+          }
+        : null,
+    );
 
     gestureRef.current = {
       kind,
@@ -1207,7 +1725,13 @@ export default function BoardApp() {
         ),
       };
     } else if (gesture.kind === 'resize' && gesture.corner) {
-      nextItem = resizedItem(item, gesture.corner, point);
+      nextItem = resizedItem(
+        item,
+        gesture.corner,
+        point,
+        item.kind !== 'shape' || event.shiftKey,
+        item.kind === 'shape' ? MIN_SHAPE_DRAW_SIZE : undefined,
+      );
     } else if (gesture.kind === 'rotate' && gesture.startAngle !== undefined) {
       const pointerAngle =
         Math.atan2(point.y - item.y, point.x - item.x) * (180 / Math.PI);
@@ -1252,6 +1776,7 @@ export default function BoardApp() {
     if (!gesture || gesture.pointerId !== event.pointerId) return;
 
     gestureRef.current = null;
+    setRotationHandleLock(null);
     if (!gesture.moved && !gesture.broughtToFront) return;
 
     setDeckHistory((current) => {
@@ -1371,6 +1896,7 @@ export default function BoardApp() {
     finishStickyNoteEdit();
     cancelActiveGesture();
     closeDrawingMenu();
+    closeShapeMenu();
     setSelectedItemId(null);
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
@@ -1554,6 +2080,7 @@ export default function BoardApp() {
     finishStickyNoteEdit();
     cancelActiveGesture();
     closeDrawingMenu();
+    closeShapeMenu();
     setSelectedItemId(null);
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
@@ -1691,9 +2218,123 @@ export default function BoardApp() {
     cancelActiveInk();
   };
 
+  const startShapeCreation = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (
+      event.button !== 0 ||
+      !event.isPrimary ||
+      shapeGestureRef.current
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    finishStickyNoteEdit();
+    cancelActiveGesture();
+    closeDrawingMenu();
+    closeShapeMenu();
+    setSelectedItemId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const boardRect: BoardRect = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const rawPoint = boardPoint(event.clientX, event.clientY, boardRect);
+    const startPoint = {
+      x: clamp(rawPoint.x, 0, BOARD_WIDTH),
+      y: clamp(rawPoint.y, 0, BOARD_HEIGHT),
+    };
+    const shape: CanvasShape = {
+      kind: 'shape',
+      id: crypto.randomUUID(),
+      shape: activeShape,
+      color: activeShapeColor,
+      x: startPoint.x,
+      y: startPoint.y,
+      width: 0,
+      height: 0,
+      rotation: 0,
+    };
+
+    shapeGestureRef.current = {
+      pointerId: event.pointerId,
+      slideId: deck.activeSlideId,
+      boardRect,
+      startPoint,
+      shape,
+    };
+    setPendingShape({ shape, slideId: deck.activeSlideId });
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const updateShapeCreation = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = shapeGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return null;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const rawPoint = boardPoint(
+      event.clientX,
+      event.clientY,
+      gesture.boardRect,
+    );
+    const point = {
+      x: clamp(rawPoint.x, 0, BOARD_WIDTH),
+      y: clamp(rawPoint.y, 0, BOARD_HEIGHT),
+    };
+    gesture.shape = {
+      ...gesture.shape,
+      x: (gesture.startPoint.x + point.x) / 2,
+      y: (gesture.startPoint.y + point.y) / 2,
+      width: Math.abs(point.x - gesture.startPoint.x),
+      height: Math.abs(point.y - gesture.startPoint.y),
+    };
+    setPendingShape({ shape: gesture.shape, slideId: gesture.slideId });
+    return gesture;
+  };
+
+  const finishShapeCreation = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = updateShapeCreation(event);
+    if (!gesture) return;
+
+    shapeGestureRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setPendingShape(null);
+
+    const completedShape = gesture.shape;
+    if (
+      activeSlideIdRef.current !== gesture.slideId ||
+      completedShape.width < MIN_SHAPE_DRAW_SIZE ||
+      completedShape.height < MIN_SHAPE_DRAW_SIZE
+    ) {
+      return;
+    }
+
+    commit((items) => [...items, completedShape]);
+    setSelectedToolId('select');
+    setSelectedItemId(completedShape.id);
+  };
+
+  const cancelShapeCreation = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = shapeGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    cancelActiveShape();
+  };
+
   const clearCanvasSelection = useCallback(() => {
     cancelActiveMarking();
     closeDrawingMenu();
+    closeShapeMenu();
     cancelActiveGesture();
     setSelectedItemId(null);
     setOpenItemMenuId(null);
@@ -1705,6 +2346,7 @@ export default function BoardApp() {
     cancelActiveGesture,
     cancelActiveMarking,
     closeDrawingMenu,
+    closeShapeMenu,
     closeSlideMenu,
   ]);
 
@@ -1854,12 +2496,19 @@ export default function BoardApp() {
     pendingErase?.slideId === deck.activeSlideId
       ? pendingErase.items
       : history.present;
-  const items =
+  const itemsWithStickyNote =
     pendingStickyNote?.slideId === deck.activeSlideId
       ? [...visibleHistoryItems, pendingStickyNote.note]
       : visibleHistoryItems;
-  const strokes = items.filter((item) => item.kind === 'stroke');
+  const items =
+    pendingShape?.slideId === deck.activeSlideId
+      ? [...itemsWithStickyNote, pendingShape.shape]
+      : itemsWithStickyNote;
+  const inkRuns = getInkRuns(items);
   const canvasObjects = items.filter((item) => item.kind !== 'stroke');
+  const itemLayer = new Map(
+    items.map((item, index) => [item.id, index + 1] as const),
+  );
 
   return (
     <main className="app-shell">
@@ -2123,13 +2772,15 @@ export default function BoardApp() {
             selectedToolId === 'sticky-note' ? ' is-placing-sticky-note' : ''
           }${selectedToolId === 'pen' ? ' is-drawing' : ''}${
             selectedToolId === 'eraser' ? ' is-erasing' : ''
-          }`}
+          }${selectedToolId === 'shape' ? ' is-placing-shape' : ''}`}
           role="region"
           tabIndex={0}
           aria-label={
             selectedToolId === 'eraser'
               ? 'Board. Ink eraser active. Drag over ink to erase; objects are unaffected.'
-              : 'Board. Draw, add sticky notes, or paste images.'
+              : selectedToolId === 'shape'
+                ? `Board. ${getShapeOption(activeShape).label} tool active. Drag to create a shape.`
+                : 'Board. Draw, add sticky notes, or paste images.'
           }
           onPointerDown={(event) => {
             if (event.currentTarget !== event.target) return;
@@ -2147,13 +2798,21 @@ export default function BoardApp() {
           onPointerCancel={finishGesture}
         >
           {canvasObjects.map((item) => {
-            const isPending = pendingStickyNote?.note.id === item.id;
+            const isPendingStickyNote =
+              pendingStickyNote?.note.id === item.id;
+            const isCreatingShape = pendingShape?.shape.id === item.id;
+            const isPending = isPendingStickyNote || isCreatingShape;
             const isDiscarding =
-              isPending && pendingStickyNote?.discarding === true;
+              isPendingStickyNote && pendingStickyNote?.discarding === true;
             const isSelected = selectedItemId === item.id;
             const isMenuOpen = openItemMenuId === item.id;
             const isColorPickerOpen = openColorPickerId === item.id;
-            const itemLabel = item.kind === 'image' ? 'image' : 'sticky note';
+            const itemLabel =
+              item.kind === 'image'
+                ? 'image'
+                : item.kind === 'sticky-note'
+                  ? 'sticky note'
+                  : 'shape';
             const itemExtents = rotatedItemExtents(item);
             const colorPickerPosition = [
               item.x - itemExtents.horizontal < BOARD_WIDTH * 0.35
@@ -2170,21 +2829,37 @@ export default function BoardApp() {
               transform: `rotate(${item.rotation}deg)`,
               '--counter-rotation': `${-item.rotation}deg`,
             } as CSSProperties;
+            const rotationHandle = rotationHandlePlacement(
+              item,
+              boardSize,
+              rotationHandleLock?.itemId === item.id
+                ? rotationHandleLock.side
+                : undefined,
+            );
 
             return (
               <div
                 key={item.id}
                 className={`canvas-item${isSelected ? ' is-selected' : ''}${
                   isDiscarding ? ' is-discarding' : ''
-                }`}
+                }${isCreatingShape ? ' is-creating-shape' : ''}`}
                 style={{
                   left: `${(item.x / BOARD_WIDTH) * 100}%`,
                   top: `${(item.y / BOARD_HEIGHT) * 100}%`,
                   width: `${(item.width / BOARD_WIDTH) * 100}%`,
                   height: `${(item.height / BOARD_HEIGHT) * 100}%`,
+                  zIndex: isSelected
+                    ? items.length + 2
+                    : itemLayer.get(item.id),
                 }}
                 data-item-id={item.id}
                 data-item-type={item.kind}
+                data-shape-type={
+                  item.kind === 'shape' ? item.shape : undefined
+                }
+                data-shape-color={
+                  item.kind === 'shape' ? item.color : undefined
+                }
               >
                 <div
                   className={`canvas-item-frame${isSelected ? ' is-selected' : ''}`}
@@ -2194,7 +2869,9 @@ export default function BoardApp() {
                   aria-label={
                     item.kind === 'image'
                       ? item.name
-                      : `Sticky note: ${item.text.trim() || 'Blank'}`
+                      : item.kind === 'sticky-note'
+                        ? `Sticky note: ${item.text.trim() || 'Blank'}`
+                        : `${getShapeOption(item.shape).label} shape`
                   }
                   onDoubleClick={(event) => {
                     if (item.kind !== 'sticky-note') return;
@@ -2236,7 +2913,7 @@ export default function BoardApp() {
                       alt={item.name}
                       draggable={false}
                     />
-                  ) : (
+                  ) : item.kind === 'sticky-note' ? (
                     <StickyNoteContent
                       note={item}
                       draft={
@@ -2253,6 +2930,8 @@ export default function BoardApp() {
                       }
                       onFinishEditing={finishStickyNoteEdit}
                     />
+                  ) : (
+                    <ShapeContent color={item.color} shape={item.shape} />
                   )}
 
                   {isSelected ? (
@@ -2262,13 +2941,16 @@ export default function BoardApp() {
                         <>
                           <button
                             type="button"
-                            className="rotation-zone"
+                            className={`rotation-handle${rotationHandle.className}`}
+                            style={rotationHandle.style}
                             aria-label={`Rotate ${itemLabel}`}
                             title={`Drag around the ${itemLabel} to rotate. Hold Shift to snap.`}
                             onPointerDown={(event) =>
                               startGesture(event, item, 'rotate')
                             }
-                          />
+                          >
+                            <RotateCw aria-hidden="true" />
+                          </button>
 
                           {resizeCorners.map((corner) => (
                             <button
@@ -2290,7 +2972,7 @@ export default function BoardApp() {
                           className={`note-color-anchor${
                             isColorPickerOpen ? ' is-open' : ''
                           }${colorPickerPosition}`}
-                          data-note-color-picker={item.id}
+                          data-color-picker={item.id}
                           onPointerDown={(event) => {
                             event.preventDefault();
                             event.stopPropagation();
@@ -2386,6 +3068,101 @@ export default function BoardApp() {
                             </button>
                           )}
                         </div>
+                      ) : item.kind === 'shape' ? (
+                        <div
+                          className={`note-color-anchor${
+                            isColorPickerOpen ? ' is-open' : ''
+                          }${colorPickerPosition}`}
+                          data-color-picker={item.id}
+                          onPointerDown={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                          }}
+                        >
+                          {isColorPickerOpen ? (
+                            <div
+                              className="note-color-options"
+                              role="radiogroup"
+                              aria-label="Shape color"
+                            >
+                              {shapeColors.map((color) => (
+                                <button
+                                  key={color.id}
+                                  ref={
+                                    item.color === color.id
+                                      ? activeColorChoiceRef
+                                      : undefined
+                                  }
+                                  type="button"
+                                  className="note-color-choice shape-color-choice"
+                                  role="radio"
+                                  aria-label={color.label}
+                                  aria-checked={item.color === color.id}
+                                  tabIndex={item.color === color.id ? 0 : -1}
+                                  title={color.label}
+                                  style={
+                                    {
+                                      '--note-swatch-color': color.fill,
+                                      '--shape-swatch-stroke': color.stroke,
+                                    } as CSSProperties
+                                  }
+                                  onClick={() =>
+                                    changeShapeColor(item.id, color.id)
+                                  }
+                                  onKeyDown={(event) => {
+                                    if (
+                                      event.key === 'Enter' ||
+                                      event.key === ' '
+                                    ) {
+                                      event.preventDefault();
+                                      changeShapeColor(item.id, color.id);
+                                      return;
+                                    }
+                                    moveColorChoiceFocus(event);
+                                  }}
+                                >
+                                  <span aria-hidden="true" />
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="note-color-trigger shape-color-trigger"
+                              aria-label="Change shape color"
+                              aria-expanded={false}
+                              title="Change color"
+                              onKeyDown={(event) => {
+                                if (
+                                  event.key !== 'Enter' &&
+                                  event.key !== ' '
+                                ) {
+                                  return;
+                                }
+                                event.preventDefault();
+                                focusColorPickerOnOpenRef.current = true;
+                                setOpenColorPickerId(item.id);
+                              }}
+                              onClick={(event) => {
+                                focusColorPickerOnOpenRef.current =
+                                  event.detail === 0;
+                                setOpenColorPickerId(item.id);
+                              }}
+                            >
+                              <span
+                                style={{
+                                  backgroundColor: getShapeColorValue(
+                                    item.color,
+                                  ).fill,
+                                  boxShadow: `inset 0 0 0 2px ${
+                                    getShapeColorValue(item.color).stroke
+                                  }`,
+                                }}
+                                aria-hidden="true"
+                              />
+                            </button>
+                          )}
+                        </div>
                       ) : null}
 
                       {!isPending ? (
@@ -2412,6 +3189,23 @@ export default function BoardApp() {
 
                         {isMenuOpen ? (
                           <div className="item-menu-popover" role="menu">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => duplicateItem(item)}
+                            >
+                              <CopyPlus aria-hidden="true" />
+                              Duplicate {itemLabel}
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => copyItem(item)}
+                            >
+                              <Copy aria-hidden="true" />
+                              Copy {itemLabel}
+                            </button>
+                            <span className="item-menu-divider" aria-hidden="true" />
                             <button
                               type="button"
                               role="menuitem"
@@ -2449,40 +3243,64 @@ export default function BoardApp() {
             );
           })}
 
-          {strokes.length > 0 ? (
+          {inkRuns.map((run) => (
             <svg
+              key={run.id}
               className="completed-ink-layer"
               viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`}
               preserveAspectRatio="none"
               aria-hidden="true"
+              style={{ zIndex: run.layer }}
             >
-              {strokes.map((stroke) => (
+              {run.strokes.map((stroke) => (
                 <InkStrokePath key={stroke.id} stroke={stroke} />
               ))}
             </svg>
-          ) : null}
+          ))}
 
-          {selectedToolId === 'pen' || selectedToolId === 'eraser' ? (
+          {selectedToolId === 'pen' ||
+          selectedToolId === 'eraser' ||
+          selectedToolId === 'shape' ? (
             <div
               ref={drawingSurfaceRef}
               className={`drawing-surface${
                 selectedToolId === 'eraser' ? ' is-erasing' : ''
-              }`}
+              }${selectedToolId === 'shape' ? ' is-shaping' : ''}`}
               aria-hidden="true"
               onPointerDown={
-                selectedToolId === 'pen' ? startInkStroke : startEraserStroke
+                selectedToolId === 'pen'
+                  ? startInkStroke
+                  : selectedToolId === 'eraser'
+                    ? startEraserStroke
+                    : startShapeCreation
               }
               onPointerMove={
-                selectedToolId === 'pen' ? moveInkStroke : moveEraserStroke
+                selectedToolId === 'pen'
+                  ? moveInkStroke
+                  : selectedToolId === 'eraser'
+                    ? moveEraserStroke
+                    : updateShapeCreation
               }
               onPointerUp={
-                selectedToolId === 'pen' ? finishInkStroke : finishEraserStroke
+                selectedToolId === 'pen'
+                  ? finishInkStroke
+                  : selectedToolId === 'eraser'
+                    ? finishEraserStroke
+                    : finishShapeCreation
               }
               onPointerCancel={
-                selectedToolId === 'pen' ? cancelInkStroke : cancelEraserStroke
+                selectedToolId === 'pen'
+                  ? cancelInkStroke
+                  : selectedToolId === 'eraser'
+                    ? cancelEraserStroke
+                    : cancelShapeCreation
               }
               onLostPointerCapture={
-                selectedToolId === 'pen' ? cancelInkStroke : cancelEraserStroke
+                selectedToolId === 'pen'
+                  ? cancelInkStroke
+                  : selectedToolId === 'eraser'
+                    ? cancelEraserStroke
+                    : cancelShapeCreation
               }
               onPointerEnter={
                 selectedToolId === 'eraser' ? showEraserPreview : undefined
@@ -2530,35 +3348,74 @@ export default function BoardApp() {
         aria-label="Board tools"
         inert={isSlideOverviewOpen}
       >
-        {tools.map((tool) =>
-          tool.id === 'pen' ? (
-            <div key={tool.id} className="drawing-menu-anchor" data-drawing-menu>
-              <ToolButton
-                buttonRef={penToolButtonRef}
-                controls="drawing-options"
-                expanded={isDrawingMenuOpen}
-                tool={tool}
-                selected={selectedToolId === tool.id}
-                onSelect={() => selectTool(tool)}
-              />
-              {isDrawingMenuOpen ? (
-                <DrawingMenu
-                  style={drawingStyle}
-                  color={drawingColor}
-                  onStyleChange={setDrawingStyle}
-                  onColorChange={setDrawingColor}
+        {tools.map((tool) => {
+          if (tool.id === 'pen') {
+            return (
+              <div
+                key={tool.id}
+                className="drawing-menu-anchor"
+                data-drawing-menu
+              >
+                <ToolButton
+                  buttonRef={penToolButtonRef}
+                  controls="drawing-options"
+                  expanded={isDrawingMenuOpen}
+                  tool={tool}
+                  selected={selectedToolId === tool.id}
+                  onSelect={() => selectTool(tool)}
                 />
-              ) : null}
-            </div>
-          ) : (
+                {isDrawingMenuOpen ? (
+                  <DrawingMenu
+                    style={drawingStyle}
+                    color={drawingColor}
+                    onStyleChange={setDrawingStyle}
+                    onColorChange={setDrawingColor}
+                  />
+                ) : null}
+              </div>
+            );
+          }
+
+          if (tool.id === 'shape') {
+            return (
+              <div
+                key={tool.id}
+                className="shape-menu-anchor"
+                data-shape-menu
+              >
+                <ToolButton
+                  buttonRef={shapeToolButtonRef}
+                  controls="shape-options"
+                  expanded={isShapeMenuOpen}
+                  glyph={<ShapeContent icon shape={activeShape} />}
+                  tool={tool}
+                  selected={selectedToolId === tool.id}
+                  onSelect={(event) => {
+                    setFocusShapeMenuSelection(event.detail === 0);
+                    selectTool(tool);
+                  }}
+                />
+                {isShapeMenuOpen ? (
+                  <ShapeMenu
+                    focusSelected={focusShapeMenuSelection}
+                    shape={activeShape}
+                    onShapeFocus={setActiveShape}
+                    onShapeSelect={chooseShape}
+                  />
+                ) : null}
+              </div>
+            );
+          }
+
+          return (
             <ToolButton
               key={tool.id}
               tool={tool}
               selected={selectedToolId === tool.id}
               onSelect={() => selectTool(tool)}
             />
-          ),
-        )}
+          );
+        })}
       </nav>
     </main>
   );

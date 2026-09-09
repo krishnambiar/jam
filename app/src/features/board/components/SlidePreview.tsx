@@ -1,6 +1,8 @@
 import { BOARD_HEIGHT, BOARD_WIDTH } from '../constants';
 import type { CanvasItem } from '../types';
+import { getInkRuns } from '../utils';
 import { InkStrokePath } from './InkStroke';
+import { ShapeContent } from './ShapeContent';
 import { StickyNoteContent } from './StickyNoteContent';
 
 type SlidePreviewProps = {
@@ -8,41 +10,50 @@ type SlidePreviewProps = {
 };
 
 export function SlidePreview({ items }: SlidePreviewProps) {
-  const strokes = items.filter((item) => item.kind === 'stroke');
-  const objects = items.filter((item) => item.kind !== 'stroke');
+  const itemLayer = new Map(
+    items.map((item, index) => [item.id, index + 1] as const),
+  );
+  const inkRuns = getInkRuns(items);
 
   return (
     <span className="slide-preview-canvas" aria-hidden="true">
-      {objects.map((item) => (
-        <span
-          key={item.id}
-          className="slide-preview-item"
-          style={{
-            left: `${(item.x / BOARD_WIDTH) * 100}%`,
-            top: `${(item.y / BOARD_HEIGHT) * 100}%`,
-            width: `${(item.width / BOARD_WIDTH) * 100}%`,
-            height: `${(item.height / BOARD_HEIGHT) * 100}%`,
-            transform: `translate(-50%, -50%) rotate(${item.rotation}deg)`,
-          }}
-        >
-          {item.kind === 'image' ? (
-            <img src={item.src} alt="" draggable={false} />
-          ) : (
-            <StickyNoteContent note={item} />
-          )}
-        </span>
-      ))}
-      {strokes.length > 0 ? (
+      {items.map((item) =>
+        item.kind === 'stroke' ? null : (
+          <span
+            key={item.id}
+            className="slide-preview-item"
+            style={{
+              left: `${(item.x / BOARD_WIDTH) * 100}%`,
+              top: `${(item.y / BOARD_HEIGHT) * 100}%`,
+              width: `${(item.width / BOARD_WIDTH) * 100}%`,
+              height: `${(item.height / BOARD_HEIGHT) * 100}%`,
+              zIndex: itemLayer.get(item.id),
+              transform: `translate(-50%, -50%) rotate(${item.rotation}deg)`,
+            }}
+          >
+            {item.kind === 'image' ? (
+              <img src={item.src} alt="" draggable={false} />
+            ) : item.kind === 'sticky-note' ? (
+              <StickyNoteContent note={item} />
+            ) : (
+              <ShapeContent color={item.color} shape={item.shape} />
+            )}
+          </span>
+        ),
+      )}
+      {inkRuns.map((run) => (
         <svg
+          key={run.id}
           className="slide-preview-ink"
           viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`}
           preserveAspectRatio="none"
+          style={{ zIndex: run.layer }}
         >
-          {strokes.map((stroke) => (
+          {run.strokes.map((stroke) => (
             <InkStrokePath key={stroke.id} stroke={stroke} />
           ))}
         </svg>
-      ) : null}
+      ))}
     </span>
   );
 }

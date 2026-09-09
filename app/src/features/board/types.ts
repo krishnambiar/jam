@@ -44,6 +44,30 @@ export type CanvasStickyNote = CanvasTransform & {
   color: StickyNoteColor;
 };
 
+export type ShapeType =
+  | 'circle'
+  | 'rectangle'
+  | 'triangle'
+  | 'diamond'
+  | 'rounded-rectangle'
+  | 'half-circle'
+  | 'bar'
+  | 'arrow';
+
+export type ShapeColor =
+  | 'charcoal'
+  | 'blue'
+  | 'green'
+  | 'yellow'
+  | 'red'
+  | 'white';
+
+export type CanvasShape = CanvasTransform & {
+  kind: 'shape';
+  shape: ShapeType;
+  color: ShapeColor;
+};
+
 export type DrawingStyle = 'pen' | 'marker' | 'highlighter' | 'brush';
 
 export type DrawingColor =
@@ -81,7 +105,10 @@ export type CanvasStroke = {
   erasures?: EraserTrace[];
 };
 
-export type TransformableCanvasItem = CanvasImage | CanvasStickyNote;
+export type TransformableCanvasItem =
+  | CanvasImage
+  | CanvasStickyNote
+  | CanvasShape;
 
 export type CanvasItem = TransformableCanvasItem | CanvasStroke;
 

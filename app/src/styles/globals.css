@@ -289,6 +289,7 @@ select {
 
 .slide-preview-canvas {
   position: relative;
+  isolation: isolate;
   display: block;
   width: 100%;
   height: 100%;
@@ -299,7 +300,6 @@ select {
 
 .slide-preview-ink {
   position: absolute;
-  z-index: 2;
   inset: 0;
   display: block;
   width: 100%;
@@ -691,7 +691,8 @@ select {
   box-shadow: 0 0 0 2px rgb(26 115 232 / 45%), 0 1px 2px rgb(60 64 67 / 14%);
 }
 
-.board.is-placing-sticky-note {
+.board.is-placing-sticky-note,
+.board.is-placing-shape {
   cursor: crosshair;
 }
 
@@ -721,13 +722,12 @@ select {
 }
 
 .completed-ink-layer {
-  z-index: 2;
   overflow: hidden;
   pointer-events: none;
 }
 
 .drawing-surface {
-  z-index: 4;
+  z-index: 10000;
   overflow: hidden;
   cursor: crosshair;
   touch-action: none;
@@ -735,6 +735,10 @@ select {
 
 .drawing-surface.is-erasing {
   cursor: none;
+}
+
+.drawing-surface.is-shaping {
+  cursor: crosshair;
 }
 
 .eraser-cursor {
@@ -796,6 +800,35 @@ select {
   pointer-events: none;
   user-select: none;
   -webkit-user-drag: none;
+}
+
+.shape-content {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.shape-geometry {
+  fill: var(--shape-fill-color);
+  stroke: var(--shape-stroke-color);
+  stroke-width: 2.5;
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
+}
+
+.shape-content.is-icon .shape-geometry {
+  fill: none;
+  stroke-width: 2;
+}
+
+.slide-preview-item .shape-geometry {
+  stroke-width: 0.75;
+}
+
+.canvas-item.is-creating-shape {
+  pointer-events: none;
 }
 
 .canvas-item-frame.is-selected .canvas-image {
@@ -906,7 +939,7 @@ select {
 }
 
 .resize-handle,
-.rotation-zone {
+.rotation-handle {
   position: absolute;
   display: block;
   margin: 0;
@@ -915,21 +948,57 @@ select {
   touch-action: none;
 }
 
-.rotation-zone {
-  z-index: 3;
-  top: 0;
-  left: 0;
-  width: 38px;
-  height: 38px;
-  border: 0;
+.rotation-handle {
+  z-index: 5;
+  top: calc(-22px + var(--rotation-handle-shift-y, 0px));
+  left: calc(50% + var(--rotation-handle-shift-x, 0px));
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 2px solid #fff;
   outline: none;
-  background: transparent;
+  color: #fff;
+  background: #669df6;
+  box-shadow: 0 1px 3px rgb(60 64 67 / 28%);
   cursor: grab;
   transform: translate(-50%, -50%);
 }
 
-.rotation-zone:focus-visible {
-  box-shadow: 0 0 0 2px #202124;
+.rotation-handle::after {
+  position: absolute;
+  z-index: -1;
+  top: 21px;
+  left: 50%;
+  width: 2px;
+  height: 13px;
+  background: #669df6;
+  content: '';
+  transform: translateX(-50%);
+}
+
+.rotation-handle.is-below {
+  top: calc(100% + 22px + var(--rotation-handle-shift-y, 0px));
+}
+
+.rotation-handle.is-below::after {
+  top: auto;
+  bottom: 21px;
+}
+
+.rotation-handle.is-shifted::after {
+  display: none;
+}
+
+.rotation-handle svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 2.5;
+  transform: rotate(var(--counter-rotation));
+}
+
+.rotation-handle:focus-visible {
+  box-shadow: 0 0 0 2px #202124, 0 1px 3px rgb(60 64 67 / 28%);
 }
 
 .resize-handle {
@@ -1022,7 +1091,7 @@ select {
   top: 47px;
   right: 0;
   display: grid;
-  width: 174px;
+  width: 190px;
   padding: 6px;
   border: 1px solid #e2e5e9;
   border-radius: 9px;
@@ -1213,6 +1282,10 @@ select {
   background: var(--note-swatch-color);
 }
 
+.shape-color-choice > span {
+  box-shadow: inset 0 0 0 2px var(--shape-swatch-stroke);
+}
+
 .item-menu-divider {
   height: 1px;
   margin: 5px 4px;
@@ -1221,7 +1294,7 @@ select {
 
 .board-notice {
   position: absolute;
-  z-index: 50;
+  z-index: 20000;
   bottom: 18px;
   left: 50%;
   max-width: calc(100% - 36px);
@@ -1254,12 +1327,71 @@ select {
   box-shadow: 0 1px 2px rgb(60 64 67 / 8%);
 }
 
-.drawing-menu-anchor {
+.drawing-menu-anchor,
+.shape-menu-anchor {
   position: relative;
   display: grid;
   width: 100%;
   height: 100%;
   place-items: center;
+}
+
+.shape-menu {
+  position: absolute;
+  z-index: 10;
+  top: 50%;
+  left: calc(100% + 3px);
+  display: grid;
+  grid-template-columns: repeat(4, 42px);
+  grid-template-rows: repeat(2, 42px);
+  width: 170px;
+  height: 86px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #dedede;
+  border-radius: 21px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(60 64 67 / 7%);
+  transform: translateY(-22px);
+}
+
+.shape-choice {
+  position: relative;
+  display: grid;
+  width: 42px;
+  height: 42px;
+  margin: 0;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  outline: none;
+  color: var(--icon);
+  background: transparent;
+  cursor: pointer;
+}
+
+.shape-choice::before {
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: transparent;
+  content: '';
+}
+
+.shape-choice:hover::before,
+.shape-choice[aria-checked='true']::before {
+  background: #efefef;
+}
+
+.shape-choice:focus-visible::before {
+  box-shadow: 0 0 0 2px var(--blue);
+}
+
+.shape-choice .shape-content {
+  position: relative;
+  z-index: 1;
+  width: 18px;
+  height: 18px;
 }
 
 .drawing-menu {
@@ -1397,6 +1529,21 @@ select {
   background: var(--icon);
 }
 
+.tool-button.tool-shape.is-selected {
+  --tool-surface: #fff;
+
+  width: 38px;
+  height: 38px;
+  color: var(--icon);
+  background: #fff;
+  box-shadow: inset 0 0 0 1px #dadce0;
+}
+
+.tool-button.tool-shape > .shape-content {
+  width: 18px;
+  height: 18px;
+}
+
 @media (hover: hover) {
   .tool-button:not(.is-selected):hover {
     background: #f1f3f4;
@@ -1442,8 +1589,17 @@ select {
   color: #fff;
 }
 
+.tool-button.tool-shape.is-selected .tool-menu-mark {
+  color: #73777c;
+}
+
 .tool-button:focus-visible {
   box-shadow: 0 0 0 2px #fff, 0 0 0 4px #1a73e8;
+}
+
+.tool-button.tool-shape.is-selected:focus-visible {
+  box-shadow: inset 0 0 0 1px #dadce0, 0 0 0 2px #fff,
+    0 0 0 4px #1a73e8;
 }
 
 .tool-button .tool-menu-mark {

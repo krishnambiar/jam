@@ -26,6 +26,32 @@ export type EraserSweep = {
   to: EraserPoint;
 };
 
+export type InkRun = {
+  id: string;
+  layer: number;
+  strokes: CanvasStroke[];
+};
+
+export function getInkRuns(items: CanvasItem[]) {
+  const runs: InkRun[] = [];
+
+  items.forEach((item, index) => {
+    if (item.kind !== 'stroke') return;
+
+    const previousItem = items[index - 1];
+    const currentRun = runs.at(-1);
+    if (previousItem?.kind === 'stroke' && currentRun) {
+      currentRun.strokes.push(item);
+      currentRun.layer = index + 1;
+      return;
+    }
+
+    runs.push({ id: item.id, layer: index + 1, strokes: [item] });
+  });
+
+  return runs;
+}
+
 export function addToPast(past: CanvasItem[][], snapshot: CanvasItem[]) {
   return [...past, snapshot].slice(-HISTORY_LIMIT);
 }
@@ -433,6 +459,8 @@ export function resizedItem<T extends CanvasTransform>(
   item: T,
   corner: ResizeCorner,
   pointer: Point,
+  preserveAspectRatio = true,
+  minimumSize = MIN_ITEM_SIZE,
 ): T {
   const horizontalSign = corner.endsWith('e') ? 1 : -1;
   const verticalSign = corner.startsWith('s') ? 1 : -1;
@@ -452,16 +480,32 @@ export function resizedItem<T extends CanvasTransform>(
     { x: pointer.x - fixedCorner.x, y: pointer.y - fixedCorner.y },
     -item.rotation,
   );
-  const diagonal = {
-    x: horizontalSign * aspectRatio,
-    y: verticalSign,
-  };
-  const projectedHeight =
-    (pointerFromFixed.x * diagonal.x + pointerFromFixed.y * diagonal.y) /
-    (diagonal.x * diagonal.x + diagonal.y * diagonal.y);
-  const minimumHeight = Math.max(MIN_ITEM_SIZE, MIN_ITEM_SIZE / aspectRatio);
-  const nextHeight = clamp(projectedHeight, minimumHeight, BOARD_HEIGHT * 2);
-  const nextWidth = nextHeight * aspectRatio;
+  let nextWidth: number;
+  let nextHeight: number;
+
+  if (preserveAspectRatio) {
+    const diagonal = {
+      x: horizontalSign * aspectRatio,
+      y: verticalSign,
+    };
+    const projectedHeight =
+      (pointerFromFixed.x * diagonal.x + pointerFromFixed.y * diagonal.y) /
+      (diagonal.x * diagonal.x + diagonal.y * diagonal.y);
+    const minimumHeight = Math.max(minimumSize, minimumSize / aspectRatio);
+    nextHeight = clamp(projectedHeight, minimumHeight, BOARD_HEIGHT * 2);
+    nextWidth = nextHeight * aspectRatio;
+  } else {
+    nextWidth = clamp(
+      pointerFromFixed.x * horizontalSign,
+      minimumSize,
+      BOARD_WIDTH * 2,
+    );
+    nextHeight = clamp(
+      pointerFromFixed.y * verticalSign,
+      minimumSize,
+      BOARD_HEIGHT * 2,
+    );
+  }
   const draggedOffset = rotateVector(
     {
       x: horizontalSign * nextWidth,

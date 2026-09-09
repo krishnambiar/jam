@@ -12,6 +12,8 @@ import type {
   DrawingStyle,
   HistoryState,
   ResizeCorner,
+  ShapeColor,
+  ShapeType,
   Slide,
   StickyNoteColor,
   Tool,
@@ -20,6 +22,7 @@ import type {
 export const BOARD_WIDTH = 1600;
 export const BOARD_HEIGHT = 900;
 export const MIN_ITEM_SIZE = 56;
+export const MIN_SHAPE_DRAW_SIZE = 8;
 export const STICKY_NOTE_SIZE = 280;
 export const HISTORY_LIMIT = 100;
 export const MAX_SLIDES = 20;
@@ -89,6 +92,42 @@ export function getStickyNoteColorValue(color: StickyNoteColor) {
     stickyNoteColors.find((option) => option.id === color)?.value ??
     stickyNoteColors[0].value
   );
+}
+
+export const shapeOptions: ReadonlyArray<{
+  id: ShapeType;
+  label: string;
+}> = [
+  { id: 'circle', label: 'Circle' },
+  { id: 'rectangle', label: 'Square or rectangle' },
+  { id: 'triangle', label: 'Triangle' },
+  { id: 'diamond', label: 'Diamond' },
+  { id: 'rounded-rectangle', label: 'Rounded rectangle' },
+  { id: 'half-circle', label: 'Half-circle' },
+  { id: 'bar', label: 'Bar' },
+  { id: 'arrow', label: 'Arrow' },
+];
+
+export const shapeColors: ReadonlyArray<{
+  id: ShapeColor;
+  label: string;
+  stroke: string;
+  fill: string;
+}> = [
+  { id: 'charcoal', label: 'Charcoal', stroke: '#3c4043', fill: '#e8eaed' },
+  { id: 'blue', label: 'Blue', stroke: '#4285f4', fill: '#e8f0fe' },
+  { id: 'green', label: 'Green', stroke: '#34a853', fill: '#e6f4ea' },
+  { id: 'yellow', label: 'Yellow', stroke: '#f9ab00', fill: '#fef7e0' },
+  { id: 'red', label: 'Red', stroke: '#ea4335', fill: '#fce8e6' },
+  { id: 'white', label: 'White', stroke: '#9aa0a6', fill: '#ffffff' },
+];
+
+export function getShapeOption(shape: ShapeType) {
+  return shapeOptions.find((option) => option.id === shape) ?? shapeOptions[0];
+}
+
+export function getShapeColorValue(color: ShapeColor) {
+  return shapeColors.find((option) => option.id === color) ?? shapeColors[0];
 }
 
 export const resizeCorners: ResizeCorner[] = ['nw', 'ne', 'sw', 'se'];
