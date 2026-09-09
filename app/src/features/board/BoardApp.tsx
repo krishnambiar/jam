@@ -180,7 +180,10 @@ function isClipboardItem(value: unknown): value is TransformableCanvasItem {
   if (item.kind === 'shape') {
     return (
       shapeColors.some((color) => color.id === item.color) &&
-      getShapeOption(item.shape as ShapeType).id === item.shape
+      getShapeOption(item.shape as ShapeType).id === item.shape &&
+      (item.arrowDirection === undefined ||
+        item.arrowDirection === 'left' ||
+        item.arrowDirection === 'right')
     );
   }
   if (item.kind === 'sticky-note') {
@@ -1729,7 +1732,7 @@ export default function BoardApp() {
         item,
         gesture.corner,
         point,
-        item.kind !== 'shape' || event.shiftKey,
+        item.kind !== 'shape' || item.shape === 'square' || event.shiftKey,
         item.kind === 'shape' ? MIN_SHAPE_DRAW_SIZE : undefined,
       );
     } else if (gesture.kind === 'rotate' && gesture.startAngle !== undefined) {
@@ -2254,6 +2257,7 @@ export default function BoardApp() {
       id: crypto.randomUUID(),
       shape: activeShape,
       color: activeShapeColor,
+      arrowDirection: 'right',
       x: startPoint.x,
       y: startPoint.y,
       width: 0,
@@ -2287,13 +2291,60 @@ export default function BoardApp() {
       x: clamp(rawPoint.x, 0, BOARD_WIDTH),
       y: clamp(rawPoint.y, 0, BOARD_HEIGHT),
     };
-    gesture.shape = {
-      ...gesture.shape,
-      x: (gesture.startPoint.x + point.x) / 2,
-      y: (gesture.startPoint.y + point.y) / 2,
-      width: Math.abs(point.x - gesture.startPoint.x),
-      height: Math.abs(point.y - gesture.startPoint.y),
-    };
+    const deltaX = point.x - gesture.startPoint.x;
+    const deltaY = point.y - gesture.startPoint.y;
+
+    if (gesture.shape.shape === 'square') {
+      const horizontalDirection =
+        deltaX === 0
+          ? gesture.startPoint.x <= BOARD_WIDTH / 2
+            ? 1
+            : -1
+          : Math.sign(deltaX);
+      const verticalDirection =
+        deltaY === 0
+          ? gesture.startPoint.y <= BOARD_HEIGHT / 2
+            ? 1
+            : -1
+          : Math.sign(deltaY);
+      const horizontalRoom =
+        horizontalDirection > 0
+          ? BOARD_WIDTH - gesture.startPoint.x
+          : gesture.startPoint.x;
+      const verticalRoom =
+        verticalDirection > 0
+          ? BOARD_HEIGHT - gesture.startPoint.y
+          : gesture.startPoint.y;
+      const side = Math.min(
+        Math.max(Math.abs(deltaX), Math.abs(deltaY)),
+        horizontalRoom,
+        verticalRoom,
+      );
+
+      gesture.shape = {
+        ...gesture.shape,
+        x: gesture.startPoint.x + (horizontalDirection * side) / 2,
+        y: gesture.startPoint.y + (verticalDirection * side) / 2,
+        width: side,
+        height: side,
+      };
+    } else {
+      gesture.shape = {
+        ...gesture.shape,
+        arrowDirection:
+          gesture.shape.shape === 'arrow'
+            ? deltaX < 0
+              ? 'left'
+              : deltaX > 0
+                ? 'right'
+                : gesture.shape.arrowDirection
+            : gesture.shape.arrowDirection,
+        x: (gesture.startPoint.x + point.x) / 2,
+        y: (gesture.startPoint.y + point.y) / 2,
+        width: Math.abs(deltaX),
+        height: Math.abs(deltaY),
+      };
+    }
     setPendingShape({ shape: gesture.shape, slideId: gesture.slideId });
     return gesture;
   };
@@ -2860,6 +2911,11 @@ export default function BoardApp() {
                 data-shape-color={
                   item.kind === 'shape' ? item.color : undefined
                 }
+                data-arrow-direction={
+                  item.kind === 'shape' && item.shape === 'arrow'
+                    ? (item.arrowDirection ?? 'right')
+                    : undefined
+                }
               >
                 <div
                   className={`canvas-item-frame${isSelected ? ' is-selected' : ''}`}
@@ -2931,7 +2987,11 @@ export default function BoardApp() {
                       onFinishEditing={finishStickyNoteEdit}
                     />
                   ) : (
-                    <ShapeContent color={item.color} shape={item.shape} />
+                    <ShapeContent
+                      arrowDirection={item.arrowDirection}
+                      color={item.color}
+                      shape={item.shape}
+                    />
                   )}
 
                   {isSelected ? (

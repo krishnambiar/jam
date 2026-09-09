@@ -810,12 +810,39 @@ select {
   pointer-events: none;
 }
 
+.canvas-item[data-item-type='shape'],
+.canvas-item[data-item-type='shape'] .canvas-item-frame {
+  pointer-events: none;
+}
+
+.canvas-item[data-item-type='shape'] .shape-geometry {
+  pointer-events: visiblePainted;
+}
+
+.canvas-item[data-item-type='shape'] .rounded-rectangle-geometry,
+.canvas-item[data-item-type='shape'] button,
+.canvas-item[data-item-type='shape'] [data-color-picker],
+.canvas-item[data-item-type='shape'] [data-item-menu] {
+  pointer-events: auto;
+}
+
 .shape-geometry {
   fill: var(--shape-fill-color);
   stroke: var(--shape-stroke-color);
   stroke-width: 2.5;
   stroke-linecap: butt;
   stroke-linejoin: miter;
+}
+
+.rounded-rectangle-geometry {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  border: 2.5px solid var(--shape-stroke-color);
+  border-radius: 14px;
+  background: var(--shape-fill-color);
+  clip-path: inset(0 round 14px);
 }
 
 .shape-content.is-icon .shape-geometry {
@@ -827,7 +854,18 @@ select {
   stroke-width: 0.75;
 }
 
+.slide-preview-item .rounded-rectangle-geometry {
+  border-width: 0.75px;
+  border-radius: 3px;
+  clip-path: inset(0 round 3px);
+}
+
 .canvas-item.is-creating-shape {
+  pointer-events: none;
+}
+
+.canvas-item.is-creating-shape .shape-geometry,
+.canvas-item.is-creating-shape .rounded-rectangle-geometry {
   pointer-events: none;
 }
 

@@ -36,7 +36,11 @@ export function SlidePreview({ items }: SlidePreviewProps) {
             ) : item.kind === 'sticky-note' ? (
               <StickyNoteContent note={item} />
             ) : (
-              <ShapeContent color={item.color} shape={item.shape} />
+              <ShapeContent
+                arrowDirection={item.arrowDirection}
+                color={item.color}
+                shape={item.shape}
+              />
             )}
           </span>
         ),

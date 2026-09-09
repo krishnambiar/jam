@@ -99,12 +99,12 @@ export const shapeOptions: ReadonlyArray<{
   label: string;
 }> = [
   { id: 'circle', label: 'Circle' },
-  { id: 'rectangle', label: 'Square or rectangle' },
+  { id: 'square', label: 'Square' },
   { id: 'triangle', label: 'Triangle' },
   { id: 'diamond', label: 'Diamond' },
   { id: 'rounded-rectangle', label: 'Rounded rectangle' },
   { id: 'half-circle', label: 'Half-circle' },
-  { id: 'bar', label: 'Bar' },
+  { id: 'rectangle', label: 'Rectangle' },
   { id: 'arrow', label: 'Arrow' },
 ];
 

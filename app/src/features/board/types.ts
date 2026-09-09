@@ -46,13 +46,15 @@ export type CanvasStickyNote = CanvasTransform & {
 
 export type ShapeType =
   | 'circle'
+  | 'square'
   | 'rectangle'
   | 'triangle'
   | 'diamond'
   | 'rounded-rectangle'
   | 'half-circle'
-  | 'bar'
   | 'arrow';
+
+export type ArrowDirection = 'left' | 'right';
 
 export type ShapeColor =
   | 'charcoal'
@@ -66,6 +68,7 @@ export type CanvasShape = CanvasTransform & {
   kind: 'shape';
   shape: ShapeType;
   color: ShapeColor;
+  arrowDirection?: ArrowDirection;
 };
 
 export type DrawingStyle = 'pen' | 'marker' | 'highlighter' | 'brush';

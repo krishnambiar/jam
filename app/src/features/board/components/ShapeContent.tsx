@@ -1,15 +1,17 @@
 import type { CSSProperties } from 'react';
 
 import { getShapeColorValue } from '../constants';
-import type { ShapeColor, ShapeType } from '../types';
+import type { ArrowDirection, ShapeColor, ShapeType } from '../types';
 
 type ShapeContentProps = {
+  arrowDirection?: ArrowDirection;
   color?: ShapeColor;
   icon?: boolean;
   shape: ShapeType;
 };
 
 export function ShapeContent({
+  arrowDirection = 'right',
   color = 'charcoal',
   icon = false,
   shape,
@@ -26,6 +28,18 @@ export function ShapeContent({
   const edge = icon ? 6 : 0;
   const farEdge = icon ? 94 : 100;
   const diameter = farEdge - edge;
+
+  if (shape === 'rounded-rectangle' && !icon) {
+    return (
+      <span
+        className="shape-content shape-rounded-rectangle is-css-shape"
+        aria-hidden="true"
+        style={style}
+      >
+        <span className="rounded-rectangle-geometry" />
+      </span>
+    );
+  }
 
   return (
     <svg
@@ -44,7 +58,7 @@ export function ShapeContent({
           rx={icon ? 44 : 50}
           ry={icon ? 44 : 50}
         />
-      ) : shape === 'rectangle' ? (
+      ) : shape === 'square' ? (
         <rect
           {...commonProps}
           x={edge}
@@ -83,7 +97,7 @@ export function ShapeContent({
               : 'M 0 100 A 50 100 0 0 1 100 100 Z'
           }
         />
-      ) : shape === 'bar' ? (
+      ) : shape === 'rectangle' ? (
         <rect
           {...commonProps}
           x={edge}
@@ -94,6 +108,11 @@ export function ShapeContent({
       ) : (
         <path
           {...commonProps}
+          transform={
+            arrowDirection === 'left'
+              ? 'translate(100 0) scale(-1 1)'
+              : undefined
+          }
           d={
             icon
               ? 'M 5 31 H 61 V 13 L 95 50 L 61 87 V 69 H 5 Z'
