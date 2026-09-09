@@ -6,10 +6,12 @@ import {
 } from 'react';
 
 import {
+  BOARD_HEIGHT,
+  BOARD_WIDTH,
   getDrawingColorValue,
   getDrawingStylePreset,
 } from '../constants';
-import type { CanvasStroke, StrokePoint } from '../types';
+import type { CanvasStroke, EraserPoint, StrokePoint } from '../types';
 import { strokePath } from '../utils';
 
 type InkStrokePathProps = {
@@ -159,6 +161,39 @@ function stableSeed(value: string) {
     hash = (hash * 31 + character.charCodeAt(0)) % 997;
   }
   return (hash % 89) + 1;
+}
+
+function eraserMaskPath(points: readonly EraserPoint[]) {
+  const commands: string[] = [];
+
+  points.slice(1).forEach((point, index) => {
+    const from = points[index];
+    const to = point;
+    const horizontal = to.x - from.x;
+    const vertical = to.y - from.y;
+    const length = Math.hypot(horizontal, vertical);
+    if (length < 0.001) return;
+
+    const normalX = -vertical / length;
+    const normalY = horizontal / length;
+    commands.push(
+      `M ${rounded(from.x + normalX * from.radius)} ${rounded(from.y + normalY * from.radius)}`,
+      `L ${rounded(to.x + normalX * to.radius)} ${rounded(to.y + normalY * to.radius)}`,
+      `L ${rounded(to.x - normalX * to.radius)} ${rounded(to.y - normalY * to.radius)}`,
+      `L ${rounded(from.x - normalX * from.radius)} ${rounded(from.y - normalY * from.radius)} Z`,
+    );
+  });
+
+  points.forEach((point) => {
+    const radius = rounded(point.radius);
+    commands.push(
+      `M ${rounded(point.x + point.radius)} ${rounded(point.y)}`,
+      `A ${radius} ${radius} 0 1 0 ${rounded(point.x - point.radius)} ${rounded(point.y)}`,
+      `A ${radius} ${radius} 0 1 0 ${rounded(point.x + point.radius)} ${rounded(point.y)} Z`,
+    );
+  });
+
+  return commands.join(' ');
 }
 
 function MarkerStroke({ live, stroke }: InkStrokePathProps) {
@@ -418,30 +453,66 @@ function ChalkFilter({ bounds, filterId, seed }: ChalkFilterProps) {
   );
 }
 
+function StrokeArtwork({ live, stroke }: InkStrokePathProps) {
+  if (stroke.style === 'marker') {
+    return <MarkerStroke live={live} stroke={stroke} />;
+  }
+  if (stroke.style === 'highlighter') {
+    return <HighlighterStroke live={live} stroke={stroke} />;
+  }
+
+  const preset = getDrawingStylePreset(stroke.style);
+  return (
+    <path
+      className={`ink-path ink-path-${stroke.style}`}
+      d={strokePath(stroke.points)}
+      fill="none"
+      opacity={preset.opacity}
+      stroke={getDrawingColorValue(stroke.color)}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={preset.strokeWidth}
+    />
+  );
+}
+
 export const InkStrokePath = forwardRef<InkStrokeHandle, InkStrokePathProps>(
   function InkStrokePath({ live = false, stroke }, ref) {
     const [, redraw] = useReducer((version: number) => version + 1, 0);
+    const maskId = `ink-mask-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
     useImperativeHandle(ref, () => ({ redraw }), [redraw]);
 
-    if (stroke.style === 'marker') {
-      return <MarkerStroke live={live} stroke={stroke} />;
-    }
-    if (stroke.style === 'highlighter') {
-      return <HighlighterStroke live={live} stroke={stroke} />;
+    if (!stroke.erasures?.length) {
+      return <StrokeArtwork live={live} stroke={stroke} />;
     }
 
-    const preset = getDrawingStylePreset(stroke.style);
     return (
-      <path
-        className={`ink-path ink-path-${stroke.style}`}
-        d={strokePath(stroke.points)}
-        fill="none"
-        opacity={preset.opacity}
-        stroke={getDrawingColorValue(stroke.color)}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth={preset.strokeWidth}
-      />
+      <>
+        <defs>
+          <mask
+            id={maskId}
+            x={0}
+            y={0}
+            width={BOARD_WIDTH}
+            height={BOARD_HEIGHT}
+            maskUnits="userSpaceOnUse"
+            maskContentUnits="userSpaceOnUse"
+            style={{ maskType: 'luminance' }}
+          >
+            <rect width={BOARD_WIDTH} height={BOARD_HEIGHT} fill="#fff" />
+            {stroke.erasures.map((trace) => (
+              <path
+                key={trace.id}
+                d={eraserMaskPath(trace.points)}
+                fill="#000"
+              />
+            ))}
+          </mask>
+        </defs>
+        <g mask={`url(#${maskId})`}>
+          <StrokeArtwork live={live} stroke={stroke} />
+        </g>
+      </>
     );
   },
 );

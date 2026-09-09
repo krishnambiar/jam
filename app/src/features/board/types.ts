@@ -12,6 +12,7 @@ export type Tool = {
   label: string;
   icon: LucideIcon | null;
   menu?: boolean;
+  shortcut?: string;
 };
 
 export type CanvasTransform = {
@@ -62,12 +63,22 @@ export type StrokePoint = Point & {
   velocity: number;
 };
 
+export type EraserPoint = Point & {
+  radius: number;
+};
+
+export type EraserTrace = {
+  id: string;
+  points: EraserPoint[];
+};
+
 export type CanvasStroke = {
   kind: 'stroke';
   id: string;
   style: DrawingStyle;
   color: DrawingColor;
   points: StrokePoint[];
+  erasures?: EraserTrace[];
 };
 
 export type TransformableCanvasItem = CanvasImage | CanvasStickyNote;

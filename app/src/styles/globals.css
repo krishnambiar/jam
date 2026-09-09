@@ -733,6 +733,22 @@ select {
   touch-action: none;
 }
 
+.drawing-surface.is-erasing {
+  cursor: none;
+}
+
+.eraser-cursor {
+  position: absolute;
+  z-index: 1;
+  box-sizing: border-box;
+  border: 1.5px solid rgb(60 64 67 / 92%);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 88%),
+    0 1px 3px rgb(32 33 36 / 24%);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
 .drawing-surface > svg,
 .ink-path {
   pointer-events: none;
@@ -1379,6 +1395,12 @@ select {
 
   color: #fff;
   background: var(--icon);
+}
+
+@media (hover: hover) {
+  .tool-button:not(.is-selected):hover {
+    background: #f1f3f4;
+  }
 }
 
 .sticky-note-glyph {

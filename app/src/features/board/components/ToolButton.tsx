@@ -31,6 +31,10 @@ export function ToolButton({
       aria-pressed={selected}
       aria-expanded={expanded}
       aria-controls={controls}
+      aria-keyshortcuts={tool.shortcut}
+      title={
+        tool.shortcut ? `${tool.label} (${tool.shortcut})` : tool.label
+      }
       onClick={onSelect}
     >
       {Icon ? (

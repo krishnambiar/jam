@@ -26,8 +26,8 @@ export const MAX_SLIDES = 20;
 export const INITIAL_SLIDE_ID = 'slide-1';
 
 export const tools: Tool[] = [
-  { id: 'pen', label: 'Pen', icon: Pen, menu: true },
-  { id: 'eraser', label: 'Eraser', icon: Eraser },
+  { id: 'pen', label: 'Pen', icon: Pen, menu: true, shortcut: 'P' },
+  { id: 'eraser', label: 'Ink eraser', icon: Eraser, shortcut: 'E' },
   { id: 'select', label: 'Select', icon: MousePointer2 },
   { id: 'sticky-note', label: 'Sticky note', icon: null },
   { id: 'shape', label: 'Shape', icon: Circle, menu: true },

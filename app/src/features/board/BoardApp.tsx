@@ -55,6 +55,8 @@ import type {
   DeckHistoryState,
   DrawingColor,
   DrawingStyle,
+  EraserPoint,
+  EraserTrace,
   Gesture,
   HistoryState,
   Point,
@@ -68,15 +70,18 @@ import type {
 import {
   addDeckToPast,
   addToPast,
+  applyEraserTraceToItems,
   appendStrokePoints,
   boardPoint,
   clamp,
   decodeImageFile,
+  eraserRadiusForVelocity,
   fittedImageSize,
   isTextEntry,
   normalizeRotation,
   resizedItem,
   rotatedItemExtents,
+  type EraserSweep,
 } from './utils';
 
 type StickyNoteEdit = {
@@ -99,6 +104,23 @@ type InkGesture = {
   stroke: CanvasStroke;
   lastSample: Point & { time: number };
   velocity: number | null;
+};
+
+type EraserGesture = {
+  pointerId: number;
+  slideId: string;
+  boardRect: BoardRect;
+  initialItems: CanvasItem[];
+  workingItems: CanvasItem[];
+  trace: EraserTrace;
+  sweeps: EraserSweep[];
+  lastSample: EraserPoint & { time: number };
+  velocity: number | null;
+};
+
+type PendingErase = {
+  slideId: string;
+  items: CanvasItem[];
 };
 
 function moveColorChoiceFocus(event: ReactKeyboardEvent<HTMLButtonElement>) {
@@ -154,12 +176,27 @@ function restoreGestureStart(items: CanvasItem[], gesture: Gesture) {
   ];
 }
 
+function eraserRadiusInBoardUnits(
+  boardRect: BoardRect,
+  velocity: number,
+) {
+  const horizontalScale = boardRect.width / BOARD_WIDTH;
+  const verticalScale = boardRect.height / BOARD_HEIGHT;
+  const screenScale = Math.max(
+    0.001,
+    (horizontalScale + verticalScale) / 2,
+  );
+  return eraserRadiusForVelocity(velocity) / screenScale;
+}
+
 export default function BoardApp() {
   const [selectedToolId, setSelectedToolId] = useState<Tool['id']>('select');
   const [drawingStyle, setDrawingStyle] = useState<DrawingStyle>('pen');
   const [drawingColor, setDrawingColor] = useState<DrawingColor>('charcoal');
   const [isDrawingMenuOpen, setIsDrawingMenuOpen] = useState(false);
   const [pendingStroke, setPendingStroke] = useState<CanvasStroke | null>(null);
+  const [pendingErase, setPendingErase] = useState<PendingErase | null>(null);
+  const [eraserPreview, setEraserPreview] = useState<EraserPoint | null>(null);
   const [deckHistory, setDeckHistory] = useState<DeckHistoryState>(() => ({
     past: [],
     present: {
@@ -199,6 +236,7 @@ export default function BoardApp() {
   const stickyNoteDiscardTimersRef = useRef<number[]>([]);
   const gestureRef = useRef<Gesture | null>(null);
   const inkGestureRef = useRef<InkGesture | null>(null);
+  const eraserGestureRef = useRef<EraserGesture | null>(null);
   const activeSlideIdRef = useRef(deck.activeSlideId);
   const wasSlideOverviewOpenRef = useRef(false);
   const overviewReturnFocusRef = useRef<'counter' | 'canvas'>('counter');
@@ -228,6 +266,25 @@ export default function BoardApp() {
       drawingSurfaceRef.current.releasePointerCapture(gesture.pointerId);
     }
   }, []);
+
+  const cancelActiveEraser = useCallback(() => {
+    const gesture = eraserGestureRef.current;
+    eraserGestureRef.current = null;
+    setPendingErase(null);
+    setEraserPreview(null);
+
+    if (
+      gesture &&
+      drawingSurfaceRef.current?.hasPointerCapture(gesture.pointerId)
+    ) {
+      drawingSurfaceRef.current.releasePointerCapture(gesture.pointerId);
+    }
+  }, []);
+
+  const cancelActiveMarking = useCallback(() => {
+    cancelActiveInk();
+    cancelActiveEraser();
+  }, [cancelActiveEraser, cancelActiveInk]);
 
   const closeSlideMenu = useCallback((restoreFocus = false) => {
     setOpenSlideMenuId(null);
@@ -331,7 +388,7 @@ export default function BoardApp() {
   );
 
   const undo = useCallback(() => {
-    cancelActiveInk();
+    cancelActiveMarking();
     closeDrawingMenu();
     cancelActiveGesture();
     setOpenItemMenuId(null);
@@ -352,14 +409,14 @@ export default function BoardApp() {
     });
   }, [
     cancelActiveGesture,
-    cancelActiveInk,
+    cancelActiveMarking,
     closeDrawingMenu,
     closeSlideMenu,
     openSlideMenuId,
   ]);
 
   const redo = useCallback(() => {
-    cancelActiveInk();
+    cancelActiveMarking();
     closeDrawingMenu();
     cancelActiveGesture();
     setOpenItemMenuId(null);
@@ -380,7 +437,7 @@ export default function BoardApp() {
     });
   }, [
     cancelActiveGesture,
-    cancelActiveInk,
+    cancelActiveMarking,
     closeDrawingMenu,
     closeSlideMenu,
     openSlideMenuId,
@@ -388,7 +445,7 @@ export default function BoardApp() {
 
   const deleteSlide = useCallback(
     (slideId: string) => {
-      cancelActiveInk();
+      cancelActiveMarking();
       closeDrawingMenu();
       cancelActiveGesture();
       setSelectedItemId(null);
@@ -420,12 +477,12 @@ export default function BoardApp() {
         };
       });
     },
-    [cancelActiveGesture, cancelActiveInk, closeDrawingMenu, closeSlideMenu],
+    [cancelActiveGesture, cancelActiveMarking, closeDrawingMenu, closeSlideMenu],
   );
 
   const navigateToAdjacentSlide = useCallback(
     (direction: -1 | 1) => {
-      cancelActiveInk();
+      cancelActiveMarking();
       closeDrawingMenu();
       cancelActiveGesture();
       setSelectedItemId(null);
@@ -446,7 +503,7 @@ export default function BoardApp() {
     },
     [
       cancelActiveGesture,
-      cancelActiveInk,
+      cancelActiveMarking,
       closeDrawingMenu,
       closeSlideMenu,
       setDeck,
@@ -659,19 +716,23 @@ export default function BoardApp() {
   );
 
   const selectTool = useCallback(
-    (tool: Tool) => {
-      cancelActiveInk();
+    (tool: Tool, toggleDrawingOptions = true) => {
+      cancelActiveMarking();
       finishStickyNoteEdit();
       setOpenItemMenuId(null);
       setOpenColorPickerId(null);
 
-      if (tool.id === 'pen') {
+      if (tool.id === 'pen' || tool.id === 'eraser') {
         cancelActiveGesture();
         setSelectedItemId(null);
-        setSelectedToolId('pen');
-        setIsDrawingMenuOpen((current) =>
-          selectedToolId === 'pen' ? !current : true,
-        );
+        setSelectedToolId(tool.id);
+        if (tool.id === 'pen') {
+          setIsDrawingMenuOpen((current) =>
+            toggleDrawingOptions && selectedToolId === 'pen' ? !current : false,
+          );
+        } else {
+          closeDrawingMenu();
+        }
         return;
       }
 
@@ -680,7 +741,7 @@ export default function BoardApp() {
     },
     [
       cancelActiveGesture,
-      cancelActiveInk,
+      cancelActiveMarking,
       closeDrawingMenu,
       finishStickyNoteEdit,
       selectedToolId,
@@ -690,7 +751,7 @@ export default function BoardApp() {
   const pasteImages = useCallback(
     async (files: File[]) => {
       const targetSlideId = activeSlideIdRef.current;
-      cancelActiveInk();
+      cancelActiveMarking();
       closeDrawingMenu();
       cancelActiveGesture();
       setSelectedItemId(null);
@@ -809,7 +870,7 @@ export default function BoardApp() {
         );
       }
     },
-    [cancelActiveGesture, cancelActiveInk, closeDrawingMenu],
+    [cancelActiveGesture, cancelActiveMarking, closeDrawingMenu],
   );
 
   useEffect(() => {
@@ -839,9 +900,9 @@ export default function BoardApp() {
       if (isTextEntry(event.target)) return;
 
       if (event.key === 'Escape') {
-        if (inkGestureRef.current) {
+        if (inkGestureRef.current || eraserGestureRef.current) {
           event.preventDefault();
-          cancelActiveInk();
+          cancelActiveMarking();
           return;
         }
 
@@ -878,6 +939,23 @@ export default function BoardApp() {
         event.preventDefault();
         redo();
         return;
+      }
+
+      if (
+        !commandKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        !isSlideOverviewOpen &&
+        (key === 'p' || key === 'e')
+      ) {
+        const shortcutTool = tools.find(
+          (tool) => tool.shortcut?.toLowerCase() === key,
+        );
+        if (shortcutTool) {
+          event.preventDefault();
+          selectTool(shortcutTool, false);
+          return;
+        }
       }
 
       if (isDrawingMenuOpen) return;
@@ -925,7 +1003,7 @@ export default function BoardApp() {
     closeSlideOverview,
     closeDrawingMenu,
     closeSlideMenu,
-    cancelActiveInk,
+    cancelActiveMarking,
     deck.activeSlideId,
     deleteItem,
     deleteSlide,
@@ -935,6 +1013,7 @@ export default function BoardApp() {
     openItemMenuId,
     openSlideMenuId,
     redo,
+    selectTool,
     selectedItemId,
     undo,
   ]);
@@ -1368,6 +1447,241 @@ export default function BoardApp() {
     commit((currentItems) => [...currentItems, completedStroke]);
   };
 
+  const applyEraserSweeps = (
+    gesture: EraserGesture,
+    sweeps: EraserSweep[],
+  ) => {
+    if (sweeps.length === 0) return;
+    const nextItems = applyEraserTraceToItems(
+      gesture.workingItems,
+      gesture.trace,
+      sweeps,
+    );
+    if (nextItems === gesture.workingItems) return;
+
+    gesture.workingItems = nextItems;
+    setPendingErase({ slideId: gesture.slideId, items: nextItems });
+  };
+
+  const appendPointerEventToEraser = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const gesture = eraserGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return null;
+
+    const coalescedEvents = event.nativeEvent.getCoalescedEvents?.() ?? [];
+    const samples =
+      coalescedEvents.length > 0 ? coalescedEvents : [event.nativeEvent];
+    const sweeps: EraserSweep[] = [];
+    const horizontalScale = gesture.boardRect.width / BOARD_WIDTH;
+    const verticalScale = gesture.boardRect.height / BOARD_HEIGHT;
+
+    for (const sample of samples) {
+      const rawPoint = boardPoint(
+        sample.clientX,
+        sample.clientY,
+        gesture.boardRect,
+      );
+      const point = {
+        x: clamp(rawPoint.x, 0, BOARD_WIDTH),
+        y: clamp(rawPoint.y, 0, BOARD_HEIGHT),
+      };
+      const rawTime = Number.isFinite(sample.timeStamp)
+        ? sample.timeStamp
+        : gesture.lastSample.time + 16.67;
+      const sampleTime =
+        rawTime > gesture.lastSample.time
+          ? rawTime
+          : gesture.lastSample.time + 1;
+      const elapsed = sampleTime - gesture.lastSample.time;
+      const distance = Math.hypot(
+        (point.x - gesture.lastSample.x) * horizontalScale,
+        (point.y - gesture.lastSample.y) * verticalScale,
+      );
+
+      if (distance < 0.12) {
+        gesture.lastSample = { ...gesture.lastSample, time: sampleTime };
+        continue;
+      }
+
+      const rawVelocity = distance / elapsed;
+      if (gesture.velocity === null) {
+        gesture.velocity = rawVelocity;
+      } else {
+        const blend = 1 - Math.exp(-elapsed / 28);
+        gesture.velocity += (rawVelocity - gesture.velocity) * blend;
+      }
+
+      const nextPoint: EraserPoint = {
+        ...point,
+        radius: eraserRadiusInBoardUnits(
+          gesture.boardRect,
+          gesture.velocity,
+        ),
+      };
+      const previousPoint: EraserPoint = {
+        x: gesture.lastSample.x,
+        y: gesture.lastSample.y,
+        radius: gesture.lastSample.radius,
+      };
+      const sweep = { from: previousPoint, to: nextPoint };
+      gesture.trace.points.push(nextPoint);
+      gesture.sweeps.push(sweep);
+      sweeps.push(sweep);
+      gesture.lastSample = { ...nextPoint, time: sampleTime };
+    }
+
+    applyEraserSweeps(gesture, sweeps);
+    setEraserPreview({
+      x: gesture.lastSample.x,
+      y: gesture.lastSample.y,
+      radius: gesture.lastSample.radius,
+    });
+    return gesture;
+  };
+
+  const startEraserStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (
+      event.button !== 0 ||
+      !event.isPrimary ||
+      eraserGestureRef.current
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    finishStickyNoteEdit();
+    cancelActiveGesture();
+    closeDrawingMenu();
+    setSelectedItemId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const boardRect: BoardRect = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const rawPoint = boardPoint(event.clientX, event.clientY, boardRect);
+    const point: EraserPoint = {
+      x: clamp(rawPoint.x, 0, BOARD_WIDTH),
+      y: clamp(rawPoint.y, 0, BOARD_HEIGHT),
+      radius: eraserRadiusInBoardUnits(boardRect, 0),
+    };
+    const sampleTime = Number.isFinite(event.nativeEvent.timeStamp)
+      ? event.nativeEvent.timeStamp
+      : 0;
+    const trace: EraserTrace = {
+      id: crypto.randomUUID(),
+      points: [point],
+    };
+    const initialSweep = { from: point, to: point };
+    const gesture: EraserGesture = {
+      pointerId: event.pointerId,
+      slideId: deck.activeSlideId,
+      boardRect,
+      initialItems: history.present,
+      workingItems: history.present,
+      trace,
+      sweeps: [initialSweep],
+      lastSample: { ...point, time: sampleTime },
+      velocity: null,
+    };
+
+    eraserGestureRef.current = gesture;
+    setPendingErase({ slideId: gesture.slideId, items: gesture.workingItems });
+    setEraserPreview(point);
+    applyEraserSweeps(gesture, [initialSweep]);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const showEraserPreview = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (eraserGestureRef.current) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const boardRect: BoardRect = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const point = boardPoint(event.clientX, event.clientY, boardRect);
+    setEraserPreview({
+      x: clamp(point.x, 0, BOARD_WIDTH),
+      y: clamp(point.y, 0, BOARD_HEIGHT),
+      radius: eraserRadiusInBoardUnits(boardRect, 0),
+    });
+  };
+
+  const moveEraserStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!eraserGestureRef.current) {
+      showEraserPreview(event);
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    appendPointerEventToEraser(event);
+  };
+
+  const finishEraserStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = appendPointerEventToEraser(event);
+    if (!gesture) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    eraserGestureRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setPendingErase(null);
+    setEraserPreview(
+      event.pointerType === 'touch'
+        ? null
+        : {
+            x: gesture.lastSample.x,
+            y: gesture.lastSample.y,
+            radius: gesture.lastSample.radius,
+          },
+    );
+
+    if (
+      activeSlideIdRef.current !== gesture.slideId ||
+      gesture.workingItems === gesture.initialItems
+    ) {
+      return;
+    }
+
+    const completedItems = gesture.workingItems;
+    const completedTrace: EraserTrace = {
+      id: gesture.trace.id,
+      points: gesture.trace.points.map((point) => ({ ...point })),
+    };
+    const completedSweeps = gesture.sweeps.map((sweep) => ({
+      from: { ...sweep.from },
+      to: { ...sweep.to },
+    }));
+    commit((currentItems) =>
+      currentItems === gesture.initialItems
+        ? completedItems
+        : applyEraserTraceToItems(
+            currentItems,
+            completedTrace,
+            completedSweeps,
+          ),
+    );
+  };
+
+  const cancelEraserStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = eraserGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    cancelActiveEraser();
+  };
+
   const cancelInkStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
     const gesture = inkGestureRef.current;
     if (!gesture || gesture.pointerId !== event.pointerId) return;
@@ -1378,7 +1692,7 @@ export default function BoardApp() {
   };
 
   const clearCanvasSelection = useCallback(() => {
-    cancelActiveInk();
+    cancelActiveMarking();
     closeDrawingMenu();
     cancelActiveGesture();
     setSelectedItemId(null);
@@ -1389,7 +1703,7 @@ export default function BoardApp() {
     closeSlideMenu();
   }, [
     cancelActiveGesture,
-    cancelActiveInk,
+    cancelActiveMarking,
     closeDrawingMenu,
     closeSlideMenu,
   ]);
@@ -1536,10 +1850,14 @@ export default function BoardApp() {
     updateOverviewScrollAvailability,
   ]);
 
+  const visibleHistoryItems =
+    pendingErase?.slideId === deck.activeSlideId
+      ? pendingErase.items
+      : history.present;
   const items =
     pendingStickyNote?.slideId === deck.activeSlideId
-      ? [...history.present, pendingStickyNote.note]
-      : history.present;
+      ? [...visibleHistoryItems, pendingStickyNote.note]
+      : visibleHistoryItems;
   const strokes = items.filter((item) => item.kind === 'stroke');
   const canvasObjects = items.filter((item) => item.kind !== 'stroke');
 
@@ -1803,10 +2121,16 @@ export default function BoardApp() {
           ref={boardRef}
           className={`board${
             selectedToolId === 'sticky-note' ? ' is-placing-sticky-note' : ''
-          }${selectedToolId === 'pen' ? ' is-drawing' : ''}`}
+          }${selectedToolId === 'pen' ? ' is-drawing' : ''}${
+            selectedToolId === 'eraser' ? ' is-erasing' : ''
+          }`}
           role="region"
           tabIndex={0}
-          aria-label="Board. Draw, add sticky notes, or paste images."
+          aria-label={
+            selectedToolId === 'eraser'
+              ? 'Board. Ink eraser active. Drag over ink to erase; objects are unaffected.'
+              : 'Board. Draw, add sticky notes, or paste images.'
+          }
           onPointerDown={(event) => {
             if (event.currentTarget !== event.target) return;
             if (selectedToolId === 'sticky-note') {
@@ -2138,22 +2462,40 @@ export default function BoardApp() {
             </svg>
           ) : null}
 
-          {selectedToolId === 'pen' ? (
+          {selectedToolId === 'pen' || selectedToolId === 'eraser' ? (
             <div
               ref={drawingSurfaceRef}
-              className="drawing-surface"
+              className={`drawing-surface${
+                selectedToolId === 'eraser' ? ' is-erasing' : ''
+              }`}
               aria-hidden="true"
-              onPointerDown={startInkStroke}
-              onPointerMove={moveInkStroke}
-              onPointerUp={finishInkStroke}
-              onPointerCancel={cancelInkStroke}
-              onLostPointerCapture={cancelInkStroke}
+              onPointerDown={
+                selectedToolId === 'pen' ? startInkStroke : startEraserStroke
+              }
+              onPointerMove={
+                selectedToolId === 'pen' ? moveInkStroke : moveEraserStroke
+              }
+              onPointerUp={
+                selectedToolId === 'pen' ? finishInkStroke : finishEraserStroke
+              }
+              onPointerCancel={
+                selectedToolId === 'pen' ? cancelInkStroke : cancelEraserStroke
+              }
+              onLostPointerCapture={
+                selectedToolId === 'pen' ? cancelInkStroke : cancelEraserStroke
+              }
+              onPointerEnter={
+                selectedToolId === 'eraser' ? showEraserPreview : undefined
+              }
+              onPointerLeave={() => {
+                if (!eraserGestureRef.current) setEraserPreview(null);
+              }}
             >
               <svg
                 viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`}
                 preserveAspectRatio="none"
               >
-                {pendingStroke ? (
+                {selectedToolId === 'pen' && pendingStroke ? (
                   <InkStrokePath
                     ref={activeInkRendererRef}
                     live
@@ -2161,6 +2503,17 @@ export default function BoardApp() {
                   />
                 ) : null}
               </svg>
+              {selectedToolId === 'eraser' && eraserPreview ? (
+                <span
+                  className="eraser-cursor"
+                  style={{
+                    left: `${(eraserPreview.x / BOARD_WIDTH) * 100}%`,
+                    top: `${(eraserPreview.y / BOARD_HEIGHT) * 100}%`,
+                    width: `${((eraserPreview.radius * 2) / BOARD_WIDTH) * 100}%`,
+                    height: `${((eraserPreview.radius * 2) / BOARD_HEIGHT) * 100}%`,
+                  }}
+                />
+              ) : null}
             </div>
           ) : null}
 
