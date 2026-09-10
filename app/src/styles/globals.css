@@ -724,6 +724,10 @@ select {
   background: var(--text-swatch-color);
 }
 
+.text-color-choice.is-white > span {
+  border: 1px solid #dadce0;
+}
+
 .text-color-choice[aria-checked='true'] > span {
   box-shadow: 0 0 0 2px #fff, 0 0 0 3px #80868b;
 }

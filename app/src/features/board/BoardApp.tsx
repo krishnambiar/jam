@@ -3616,7 +3616,9 @@ export default function BoardApp() {
                 <button
                   key={color.id}
                   type="button"
-                  className="text-color-choice"
+                  className={`text-color-choice${
+                    color.id === 'white' ? ' is-white' : ''
+                  }`}
                   role="radio"
                   aria-label={color.label}
                   aria-checked={selectedTextBox.color === color.id}

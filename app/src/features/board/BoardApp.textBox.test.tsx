@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import BoardApp from './BoardApp';
+import { drawingColors, textBoxColors } from './constants';
 
 function mockBoardRect(board: HTMLElement) {
   vi.spyOn(board, 'getBoundingClientRect').mockReturnValue({
@@ -152,6 +153,14 @@ describe('BoardApp text boxes', () => {
 
     fireEvent.focus(frame);
     const toolbar = screen.getByRole('toolbar', { name: 'Text formatting' });
+    expect(textBoxColors).toBe(drawingColors);
+    expect(
+      within(
+        within(toolbar).getByRole('radiogroup', { name: 'Text color' }),
+      )
+        .getAllByRole('radio')
+        .map((choice) => choice.getAttribute('aria-label')),
+    ).toEqual(['Black', 'Blue', 'Green', 'White', 'Yellow', 'Red']);
     await user.selectOptions(
       within(toolbar).getByRole('combobox', { name: 'Text style' }),
       'display',
@@ -174,7 +183,7 @@ describe('BoardApp text boxes', () => {
 
     const item = frame.closest<HTMLElement>('[data-item-type="text-box"]')!;
     expect(item).toHaveAttribute('data-text-style', 'display');
-    expect(item).toHaveAttribute('data-text-color', 'blue');
+    expect(item).toHaveAttribute('data-text-color', 'cyan');
     expect(item).toHaveAttribute('data-text-alignment', 'center');
     expect(within(toolbar).queryByLabelText(/font family/i)).toBeNull();
     expect(within(toolbar).queryByLabelText(/border|shadow|spacing/i)).toBeNull();

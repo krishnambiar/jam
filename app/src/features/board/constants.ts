@@ -16,7 +16,6 @@ import type {
   ShapeType,
   Slide,
   StickyNoteColor,
-  TextBoxColor,
   TextBoxStyle,
   Tool,
 } from './types';
@@ -195,28 +194,13 @@ export const textBoxStyles: ReadonlyArray<{
   },
 ];
 
-export const textBoxColors: ReadonlyArray<{
-  id: TextBoxColor;
-  label: string;
-  value: string;
-}> = [
-  { id: 'charcoal', label: 'Black', value: '#202124' },
-  { id: 'blue', label: 'Blue', value: '#1a73e8' },
-  { id: 'green', label: 'Green', value: '#188038' },
-  { id: 'yellow', label: 'Yellow', value: '#f9ab00' },
-  { id: 'red', label: 'Red', value: '#d93025' },
-];
+export const textBoxColors = drawingColors;
 
 export function getTextBoxStyle(style: TextBoxStyle) {
   return textBoxStyles.find((option) => option.id === style) ?? textBoxStyles[1];
 }
 
-export function getTextBoxColorValue(color: TextBoxColor) {
-  return (
-    textBoxColors.find((option) => option.id === color)?.value ??
-    textBoxColors[0].value
-  );
-}
+export const getTextBoxColorValue = getDrawingColorValue;
 
 export const resizeCorners: ResizeCorner[] = ['nw', 'ne', 'sw', 'se'];
 

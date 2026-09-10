@@ -77,14 +77,19 @@ export type CanvasShape = CanvasTransform & {
   filled?: boolean;
 };
 
-export type TextBoxStyle = 'display' | 'normal' | 'caption';
+export type DrawingStyle = 'pen' | 'marker' | 'highlighter' | 'brush';
 
-export type TextBoxColor =
+export type DrawingColor =
   | 'charcoal'
-  | 'blue'
+  | 'cyan'
   | 'green'
+  | 'white'
   | 'yellow'
   | 'red';
+
+export type TextBoxStyle = 'display' | 'normal' | 'caption';
+
+export type TextBoxColor = DrawingColor;
 
 export type TextBoxAlignment = 'left' | 'center' | 'right';
 
@@ -97,16 +102,6 @@ export type CanvasTextBox = CanvasTransform & {
   /** Multiplier applied to the selected style preset by corner scaling. */
   scale: number;
 };
-
-export type DrawingStyle = 'pen' | 'marker' | 'highlighter' | 'brush';
-
-export type DrawingColor =
-  | 'charcoal'
-  | 'cyan'
-  | 'green'
-  | 'white'
-  | 'yellow'
-  | 'red';
 
 export type Point = {
   x: number;
