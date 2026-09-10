@@ -802,6 +802,43 @@ select {
   -webkit-user-drag: none;
 }
 
+.background-removal-indicator {
+  position: absolute;
+  z-index: 1;
+  top: 10px;
+  left: 10px;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  border: 1px solid rgb(255 255 255 / 72%);
+  border-radius: 50%;
+  place-items: center;
+  background: rgb(32 33 36 / 76%);
+  box-shadow: 0 2px 7px rgb(32 33 36 / 24%);
+  pointer-events: none;
+}
+
+.background-removal-indicator > span {
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgb(255 255 255 / 38%);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: background-removal-spin 750ms linear infinite;
+}
+
+@keyframes background-removal-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .background-removal-indicator > span {
+    animation: none;
+  }
+}
+
 .shape-content {
   display: block;
   width: 100%;
@@ -1093,7 +1130,7 @@ select {
   top: 47px;
   right: 0;
   display: grid;
-  width: 190px;
+  width: 220px;
   padding: 6px;
   border: 1px solid #e2e5e9;
   border-radius: 9px;
@@ -1122,6 +1159,12 @@ select {
 .item-menu-popover button:hover,
 .item-menu-popover button:focus-visible {
   background: #f1f3f4;
+}
+
+.item-menu-popover button:disabled {
+  color: #9aa0a6;
+  background: transparent;
+  cursor: progress;
 }
 
 .item-menu-popover button svg {

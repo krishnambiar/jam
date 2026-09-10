@@ -19,6 +19,7 @@
     "app/src/**/*.ts",
     "app/src/**/*.tsx",
     "vite.config.ts",
+    "vitest.config.ts",
     "vite.sites.config.ts",
     "worker/**/*.ts"
   ],

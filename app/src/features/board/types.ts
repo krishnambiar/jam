@@ -26,8 +26,13 @@ export type CanvasTransform = {
 
 export type CanvasImage = CanvasTransform & {
   kind: 'image';
+  /** The original, unmodified image source. */
   src: string;
   name: string;
+  /** A cached transparent PNG produced by background removal. */
+  backgroundRemovedSrc?: string;
+  /** Whether the cached background-removed variant is currently visible. */
+  backgroundRemoved?: boolean;
 };
 
 export type StickyNoteColor =

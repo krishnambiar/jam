@@ -7,6 +7,9 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   root: 'app',
   publicDir: '../public',
+  define: {
+    'import.meta.env.VITE_BACKGROUND_REMOVAL_ENABLED': JSON.stringify('false'),
+  },
   css: { postcss: { plugins: [tailwindcss()] } },
   plugins: [
     react(),

@@ -1,4 +1,5 @@
 import { BOARD_HEIGHT, BOARD_WIDTH } from '../constants';
+import { activeImageSource } from '../backgroundRemoval';
 import type { CanvasItem } from '../types';
 import { getInkRuns } from '../utils';
 import { InkStrokePath } from './InkStroke';
@@ -32,7 +33,7 @@ export function SlidePreview({ items }: SlidePreviewProps) {
             }}
           >
             {item.kind === 'image' ? (
-              <img src={item.src} alt="" draggable={false} />
+              <img src={activeImageSource(item)} alt="" draggable={false} />
             ) : item.kind === 'sticky-note' ? (
               <StickyNoteContent note={item} />
             ) : (

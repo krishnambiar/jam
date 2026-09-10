@@ -5,6 +5,7 @@ import {
   ChevronUp,
   Copy,
   CopyPlus,
+  ImageOff,
   MoreVertical,
   PaintBucket,
   Plus,
@@ -37,6 +38,13 @@ import { ShapeContent } from './components/ShapeContent';
 import { ShapeMenu } from './components/ShapeMenu';
 import { StickyNoteContent } from './components/StickyNoteContent';
 import { ToolButton } from './components/ToolButton';
+import {
+  BACKGROUND_REMOVAL_ENABLED,
+  BackgroundRemovalError,
+  activeImageSource,
+  getBackgroundRemovalErrorMessage,
+  removeImageBackground,
+} from './backgroundRemoval';
 import {
   BOARD_HEIGHT,
   BOARD_WIDTH,
@@ -149,7 +157,22 @@ type PendingShape = {
   shape: CanvasShape;
 };
 
+type BackgroundRemovalJob = {
+  key: string;
+  slideId: string;
+  itemId: string;
+  originalSrc: string;
+  requestToken: string;
+  controller: AbortController;
+  processedSrc?: string;
+};
+
 const ITEM_CLIPBOARD_TYPE = 'application/x-untitled-jam-item';
+const MAX_CUSTOM_CLIPBOARD_SOURCE_CHARACTERS = 8 * 1024 * 1024;
+
+function backgroundRemovalJobKey(slideId: string, itemId: string) {
+  return JSON.stringify([slideId, itemId]);
+}
 
 function clipboardLabel(item: TransformableCanvasItem) {
   if (item.kind === 'shape') {
@@ -190,7 +213,14 @@ function isClipboardItem(value: unknown): value is TransformableCanvasItem {
   return (
     item.kind === 'image' &&
     typeof item.src === 'string' &&
-    typeof item.name === 'string'
+    typeof item.name === 'string' &&
+    (item.backgroundRemovedSrc === undefined ||
+      typeof item.backgroundRemovedSrc === 'string') &&
+    (item.backgroundRemoved === undefined ||
+      typeof item.backgroundRemoved === 'boolean') &&
+    (item.backgroundRemoved !== true ||
+      (typeof item.backgroundRemovedSrc === 'string' &&
+        item.backgroundRemovedSrc.length > 0))
   );
 }
 
@@ -217,6 +247,43 @@ function moveColorChoiceFocus(event: ReactKeyboardEvent<HTMLButtonElement>) {
 
   event.preventDefault();
   choices[nextIndex]?.focus();
+}
+
+function itemMenuChoices(menu: HTMLElement) {
+  return Array.from(
+    menu.querySelectorAll<HTMLButtonElement>(
+      '[role="menuitem"]:not(:disabled)',
+    ),
+  );
+}
+
+function setItemMenuTabStop(menu: HTMLElement, choice: HTMLButtonElement) {
+  itemMenuChoices(menu).forEach((candidate) => {
+    candidate.tabIndex = candidate === choice ? 0 : -1;
+  });
+}
+
+function moveItemMenuFocus(event: ReactKeyboardEvent<HTMLDivElement>) {
+  const direction =
+    event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
+  const choices = itemMenuChoices(event.currentTarget);
+  let nextIndex = choices.findIndex((choice) => choice === document.activeElement);
+
+  if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = choices.length - 1;
+  else if (direction !== 0 && choices.length > 0) {
+    const startIndex =
+      nextIndex < 0 ? (direction > 0 ? -1 : 0) : nextIndex;
+    nextIndex = (startIndex + direction + choices.length) % choices.length;
+  } else {
+    return;
+  }
+
+  event.preventDefault();
+  const choice = choices[nextIndex];
+  if (!choice) return;
+  setItemMenuTabStop(event.currentTarget, choice);
+  choice.focus();
 }
 
 function bringItemToFront(items: CanvasItem[], itemId: string) {
@@ -343,6 +410,9 @@ export default function BoardApp() {
     useState<PendingStickyNote | null>(null);
   const [openSlideMenuId, setOpenSlideMenuId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [backgroundRemovalJobKeys, setBackgroundRemovalJobKeys] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const boardRef = useRef<HTMLDivElement>(null);
   const overviewViewportRef = useRef<HTMLDivElement>(null);
   const activeThumbnailRef = useRef<HTMLButtonElement>(null);
@@ -355,9 +425,17 @@ export default function BoardApp() {
   const inkRenderFrameRef = useRef<number | null>(null);
   const activeColorChoiceRef = useRef<HTMLButtonElement>(null);
   const focusColorPickerOnOpenRef = useRef(false);
+  const focusItemMenuOnOpenRef = useRef(false);
   const finishingStickyNoteIdRef = useRef<string | null>(null);
   const stickyNoteDiscardTimersRef = useRef<number[]>([]);
   const gestureRef = useRef<Gesture | null>(null);
+  const backgroundRemovalJobsRef = useRef<Map<string, BackgroundRemovalJob>>(
+    new Map(),
+  );
+  const itemFrameRefsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const itemMenuButtonRefsRef = useRef<Map<string, HTMLButtonElement>>(
+    new Map(),
+  );
   const inkGestureRef = useRef<InkGesture | null>(null);
   const eraserGestureRef = useRef<EraserGesture | null>(null);
   const shapeGestureRef = useRef<ShapeGesture | null>(null);
@@ -366,6 +444,7 @@ export default function BoardApp() {
   const copiedItemInternalOnlyRef = useRef(false);
   const copyEventHandledRef = useRef(false);
   const activeSlideIdRef = useRef(deck.activeSlideId);
+  const deckRef = useRef(deck);
   const wasSlideOverviewOpenRef = useRef(false);
   const overviewReturnFocusRef = useRef<'counter' | 'canvas'>('counter');
 
@@ -464,7 +543,8 @@ export default function BoardApp() {
 
   useLayoutEffect(() => {
     activeSlideIdRef.current = deck.activeSlideId;
-  }, [deck.activeSlideId]);
+    deckRef.current = deck;
+  }, [deck]);
 
   const activeSlideIndex = Math.max(
     0,
@@ -472,6 +552,135 @@ export default function BoardApp() {
   );
   const activeSlide = deck.slides[activeSlideIndex];
   const history = activeSlide?.history ?? EMPTY_HISTORY;
+
+  const focusItemFrame = useCallback((itemId: string) => {
+    window.requestAnimationFrame(() => {
+      itemFrameRefsRef.current.get(itemId)?.focus({ preventScroll: true });
+    });
+  }, []);
+
+  const removeTrackedBackgroundRemovalJob = useCallback(
+    (job: BackgroundRemovalJob, abort = false) => {
+      if (backgroundRemovalJobsRef.current.get(job.key) !== job) return false;
+      if (abort) job.controller.abort();
+      backgroundRemovalJobsRef.current.delete(job.key);
+      setBackgroundRemovalJobKeys((current) => {
+        if (!current.has(job.key)) return current;
+        const next = new Set(current);
+        next.delete(job.key);
+        return next;
+      });
+      return true;
+    },
+    [],
+  );
+
+  const cancelBackgroundRemovalJob = useCallback(
+    (slideId: string, itemId: string) => {
+      const job = backgroundRemovalJobsRef.current.get(
+        backgroundRemovalJobKey(slideId, itemId),
+      );
+      if (job) removeTrackedBackgroundRemovalJob(job, true);
+    },
+    [removeTrackedBackgroundRemovalJob],
+  );
+
+  const cancelBackgroundRemovalJobsForSlide = useCallback(
+    (slideId: string) => {
+      Array.from(backgroundRemovalJobsRef.current.values()).forEach((job) => {
+        if (job.slideId === slideId) {
+          removeTrackedBackgroundRemovalJob(job, true);
+        }
+      });
+    },
+    [removeTrackedBackgroundRemovalJob],
+  );
+
+  const cancelAllBackgroundRemovalJobs = useCallback(() => {
+    Array.from(backgroundRemovalJobsRef.current.values()).forEach((job) => {
+      removeTrackedBackgroundRemovalJob(job, true);
+    });
+  }, [removeTrackedBackgroundRemovalJob]);
+
+  const applyCompletedBackgroundRemoval = useCallback(
+    (job: BackgroundRemovalJob) => {
+      if (!job.processedSrc) return;
+      if (backgroundRemovalJobsRef.current.get(job.key) !== job) return;
+
+      const targetSlide = deckRef.current.slides.find(
+        (slide) => slide.id === job.slideId,
+      );
+      const targetImage = targetSlide?.history.present.find(
+        (item): item is CanvasImage =>
+          item.id === job.itemId && item.kind === 'image',
+      );
+      if (!targetImage || targetImage.src !== job.originalSrc) {
+        removeTrackedBackgroundRemovalJob(job, true);
+        return;
+      }
+
+      const processedSrc = job.processedSrc;
+      const slideNumber =
+        deckRef.current.slides.findIndex((slide) => slide.id === job.slideId) +
+        1;
+      removeTrackedBackgroundRemovalJob(job);
+      setDeckHistory((current) => {
+        const slideIndex = current.present.slides.findIndex(
+          (slide) => slide.id === job.slideId,
+        );
+        if (slideIndex < 0) return current;
+
+        const slide = current.present.slides[slideIndex];
+        const imageIndex = slide.history.present.findIndex(
+          (item) =>
+            item.id === job.itemId &&
+            item.kind === 'image' &&
+            item.src === job.originalSrc,
+        );
+        if (imageIndex < 0) return current;
+
+        const image = slide.history.present[imageIndex] as CanvasImage;
+        const present = [...slide.history.present];
+        present[imageIndex] = {
+          ...image,
+          backgroundRemovedSrc: processedSrc,
+          backgroundRemoved: true,
+        };
+        const slides = [...current.present.slides];
+        slides[slideIndex] = {
+          ...slide,
+          history: {
+            past: addToPast(slide.history.past, slide.history.present),
+            present,
+            future: [],
+          },
+        };
+
+        return {
+          past: addDeckToPast(current.past, current.present),
+          present: { ...current.present, slides },
+          future: [],
+        };
+      });
+      setNotice(
+        activeSlideIdRef.current === job.slideId || slideNumber < 1
+          ? 'Background removed.'
+          : `Background removed on slide ${slideNumber}.`,
+      );
+    },
+    [removeTrackedBackgroundRemovalJob],
+  );
+
+  const flushCompletedBackgroundRemovals = useCallback(() => {
+    if (gestureRef.current || eraserGestureRef.current) return;
+    Array.from(backgroundRemovalJobsRef.current.values()).forEach((job) => {
+      if (job.processedSrc) applyCompletedBackgroundRemoval(job);
+    });
+  }, [applyCompletedBackgroundRemoval]);
+
+  useEffect(() => {
+    if (!pendingErase) flushCompletedBackgroundRemovals();
+  }, [flushCompletedBackgroundRemovals, pendingErase]);
 
   const updateActiveHistory = useCallback(
     (update: (history: HistoryState) => HistoryState) => {
@@ -500,7 +709,10 @@ export default function BoardApp() {
   const cancelActiveGesture = useCallback(() => {
     const gesture = gestureRef.current;
     gestureRef.current = null;
-    if (!gesture || (!gesture.moved && !gesture.broughtToFront)) return;
+    if (!gesture || (!gesture.moved && !gesture.broughtToFront)) {
+      flushCompletedBackgroundRemovals();
+      return;
+    }
 
     setDeck((current) => ({
       ...current,
@@ -519,7 +731,8 @@ export default function BoardApp() {
           : slide,
       ),
     }));
-  }, [setDeck]);
+    flushCompletedBackgroundRemovals();
+  }, [flushCompletedBackgroundRemovals, setDeck]);
 
   const commit = useCallback(
     (update: (items: CanvasItem[]) => CanvasItem[]) => {
@@ -539,9 +752,12 @@ export default function BoardApp() {
   );
 
   const undo = useCallback(() => {
+    if (deckHistory.past.length === 0) return;
+
     cancelActiveMarking();
     closeDrawingMenu();
     closeShapeMenu();
+    cancelAllBackgroundRemovalJobs();
     cancelActiveGesture();
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
@@ -562,16 +778,21 @@ export default function BoardApp() {
   }, [
     cancelActiveGesture,
     cancelActiveMarking,
+    cancelAllBackgroundRemovalJobs,
     closeDrawingMenu,
     closeShapeMenu,
     closeSlideMenu,
+    deckHistory.past.length,
     openSlideMenuId,
   ]);
 
   const redo = useCallback(() => {
+    if (deckHistory.future.length === 0) return;
+
     cancelActiveMarking();
     closeDrawingMenu();
     closeShapeMenu();
+    cancelAllBackgroundRemovalJobs();
     cancelActiveGesture();
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
@@ -592,17 +813,28 @@ export default function BoardApp() {
   }, [
     cancelActiveGesture,
     cancelActiveMarking,
+    cancelAllBackgroundRemovalJobs,
     closeDrawingMenu,
     closeShapeMenu,
     closeSlideMenu,
+    deckHistory.future.length,
     openSlideMenuId,
   ]);
 
   const deleteSlide = useCallback(
     (slideId: string) => {
+      const currentDeck = deckRef.current;
+      if (
+        currentDeck.slides.length <= 1 ||
+        !currentDeck.slides.some((slide) => slide.id === slideId)
+      ) {
+        return;
+      }
+
       cancelActiveMarking();
       closeDrawingMenu();
       closeShapeMenu();
+      cancelBackgroundRemovalJobsForSlide(slideId);
       cancelActiveGesture();
       setSelectedItemId(null);
       setOpenItemMenuId(null);
@@ -636,6 +868,7 @@ export default function BoardApp() {
     [
       cancelActiveGesture,
       cancelActiveMarking,
+      cancelBackgroundRemovalJobsForSlide,
       closeDrawingMenu,
       closeShapeMenu,
       closeSlideMenu,
@@ -676,6 +909,7 @@ export default function BoardApp() {
 
   const deleteItem = useCallback(
     (itemId: string) => {
+      cancelBackgroundRemovalJob(activeSlideIdRef.current, itemId);
       commit((items) => {
         if (!items.some((item) => item.id === itemId)) return items;
         return items.filter((item) => item.id !== itemId);
@@ -690,7 +924,7 @@ export default function BoardApp() {
         current?.note.id === itemId ? null : current,
       );
     },
-    [commit],
+    [cancelBackgroundRemovalJob, commit],
   );
 
   const rotateItem = useCallback(
@@ -719,6 +953,97 @@ export default function BoardApp() {
       setOpenItemMenuId(null);
     },
     [commit],
+  );
+
+  const toggleImageBackground = useCallback(
+    (item: CanvasImage) => {
+      const slideId = activeSlideIdRef.current;
+      const jobKey = backgroundRemovalJobKey(slideId, item.id);
+      setOpenItemMenuId(null);
+      focusItemFrame(item.id);
+
+      if (item.backgroundRemoved === true && item.backgroundRemovedSrc) {
+        commit((items) =>
+          items.map((candidate) =>
+            candidate.id === item.id && candidate.kind === 'image'
+              ? { ...candidate, backgroundRemoved: false }
+              : candidate,
+          ),
+        );
+        setNotice('Background restored.');
+        return;
+      }
+
+      if (item.backgroundRemovedSrc) {
+        commit((items) =>
+          items.map((candidate) =>
+            candidate.id === item.id && candidate.kind === 'image'
+              ? { ...candidate, backgroundRemoved: true }
+              : candidate,
+          ),
+        );
+        setNotice('Background removed.');
+        return;
+      }
+
+      if (backgroundRemovalJobsRef.current.has(jobKey)) return;
+
+      const job: BackgroundRemovalJob = {
+        key: jobKey,
+        slideId,
+        itemId: item.id,
+        originalSrc: item.src,
+        requestToken: crypto.randomUUID(),
+        controller: new AbortController(),
+      };
+      backgroundRemovalJobsRef.current.set(jobKey, job);
+      setBackgroundRemovalJobKeys((current) => new Set(current).add(jobKey));
+      setNotice('Removing background…');
+
+      void removeImageBackground(item.src, job.controller.signal).then(
+        (processedSrc) => {
+          const currentJob = backgroundRemovalJobsRef.current.get(jobKey);
+          if (
+            currentJob !== job ||
+            currentJob.requestToken !== job.requestToken ||
+            currentJob.originalSrc !== item.src
+          ) {
+            return;
+          }
+
+          job.processedSrc = processedSrc;
+          if (!gestureRef.current && !eraserGestureRef.current) {
+            applyCompletedBackgroundRemoval(job);
+          }
+        },
+        (error: unknown) => {
+          if (backgroundRemovalJobsRef.current.get(jobKey) !== job) return;
+          removeTrackedBackgroundRemovalJob(job);
+          if (
+            error instanceof BackgroundRemovalError &&
+            error.category === 'aborted'
+          ) {
+            return;
+          }
+          const message = getBackgroundRemovalErrorMessage(error);
+          const slideNumber =
+            deckRef.current.slides.findIndex(
+              (slide) => slide.id === job.slideId,
+            ) + 1;
+          setNotice(
+            activeSlideIdRef.current === job.slideId || slideNumber < 1
+              ? message
+              : `Slide ${slideNumber}: ${message}`,
+          );
+        },
+      );
+    },
+    [
+      applyCompletedBackgroundRemoval,
+      commit,
+      focusItemFrame,
+      removeTrackedBackgroundRemovalJob,
+    ],
   );
 
   const addCopiedItem = useCallback(
@@ -1204,13 +1529,35 @@ export default function BoardApp() {
 
       const label = clipboardLabel(item);
       event.preventDefault();
-      event.clipboardData.setData(ITEM_CLIPBOARD_TYPE, JSON.stringify(item));
-      event.clipboardData.setData('text/plain', label);
       copiedItemRef.current = { ...item };
       copiedItemLabelRef.current = label;
-      copiedItemInternalOnlyRef.current = false;
+      const canWriteCustomData =
+        item.kind !== 'image' ||
+        item.src.length + (item.backgroundRemovedSrc?.length ?? 0) <=
+          MAX_CUSTOM_CLIPBOARD_SOURCE_CHARACTERS;
+      let wroteCustomData = false;
+      let wroteText = false;
+      if (canWriteCustomData) {
+        try {
+          event.clipboardData.setData(ITEM_CLIPBOARD_TYPE, JSON.stringify(item));
+          wroteCustomData = true;
+        } catch {
+          // The in-board copy below still retains both committed image variants.
+        }
+      }
+      try {
+        event.clipboardData.setData('text/plain', label);
+        wroteText = true;
+      } catch {
+        // Some clipboard implementations reject large custom payloads.
+      }
+      copiedItemInternalOnlyRef.current = !wroteCustomData;
       copyEventHandledRef.current = true;
-      setNotice(`${item.kind === 'shape' ? 'Shape' : 'Object'} copied.`);
+      setNotice(
+        wroteCustomData || wroteText
+          ? `${item.kind === 'shape' ? 'Shape' : 'Object'} copied.`
+          : `${item.kind === 'shape' ? 'Shape' : 'Object'} copied in this board.`,
+      );
     };
 
     const handlePaste = (event: ClipboardEvent) => {
@@ -1319,6 +1666,18 @@ export default function BoardApp() {
         if (openSlideMenuId) {
           event.preventDefault();
           closeSlideMenu(true);
+          return;
+        }
+
+        if (openItemMenuId) {
+          event.preventDefault();
+          const itemId = openItemMenuId;
+          setOpenItemMenuId(null);
+          window.requestAnimationFrame(() => {
+            itemMenuButtonRefsRef.current
+              .get(itemId)
+              ?.focus({ preventScroll: true });
+          });
           return;
         }
 
@@ -1433,6 +1792,19 @@ export default function BoardApp() {
     return () => window.clearTimeout(timeout);
   }, [notice]);
 
+  useEffect(() => {
+    Array.from(backgroundRemovalJobsRef.current.values()).forEach((job) => {
+      const slide = deck.slides.find((candidate) => candidate.id === job.slideId);
+      const image = slide?.history.present.find(
+        (item): item is CanvasImage =>
+          item.id === job.itemId && item.kind === 'image',
+      );
+      if (!image || image.src !== job.originalSrc) {
+        removeTrackedBackgroundRemovalJob(job, true);
+      }
+    });
+  }, [deck, removeTrackedBackgroundRemovalJob]);
+
   useEffect(
     () => () => {
       stickyNoteDiscardTimersRef.current.forEach((timer) =>
@@ -1441,6 +1813,10 @@ export default function BoardApp() {
       if (inkRenderFrameRef.current !== null) {
         window.cancelAnimationFrame(inkRenderFrameRef.current);
       }
+      backgroundRemovalJobsRef.current.forEach((job) =>
+        job.controller.abort(),
+      );
+      backgroundRemovalJobsRef.current.clear();
     },
     [],
   );
@@ -1482,6 +1858,20 @@ export default function BoardApp() {
 
     document.addEventListener('pointerdown', closeMenu, true);
     return () => document.removeEventListener('pointerdown', closeMenu, true);
+  }, [openItemMenuId]);
+
+  useEffect(() => {
+    if (!openItemMenuId || !focusItemMenuOnOpenRef.current) return;
+    focusItemMenuOnOpenRef.current = false;
+    const animationFrame = window.requestAnimationFrame(() => {
+      const anchor = itemMenuButtonRefsRef.current
+        .get(openItemMenuId)
+        ?.closest<HTMLElement>('[data-item-menu]');
+      anchor
+        ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
+        ?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
   }, [openItemMenuId]);
 
   useEffect(() => {
@@ -1676,7 +2066,10 @@ export default function BoardApp() {
     if (!gesture || gesture.pointerId !== event.pointerId) return;
 
     gestureRef.current = null;
-    if (!gesture.moved && !gesture.broughtToFront) return;
+    if (!gesture.moved && !gesture.broughtToFront) {
+      flushCompletedBackgroundRemovals();
+      return;
+    }
 
     setDeckHistory((current) => {
       if (current.present.activeSlideId !== gesture.slideId) return current;
@@ -1724,6 +2117,7 @@ export default function BoardApp() {
         future: [],
       };
     });
+    flushCompletedBackgroundRemovals();
   };
 
   const appendPointerEventToInk = (
@@ -2755,6 +3149,11 @@ export default function BoardApp() {
             const isSelected = selectedItemId === item.id;
             const isMenuOpen = openItemMenuId === item.id;
             const isColorPickerOpen = openColorPickerId === item.id;
+            const isRemovingBackground =
+              item.kind === 'image' &&
+              backgroundRemovalJobKeys.has(
+                backgroundRemovalJobKey(deck.activeSlideId, item.id),
+              );
             const itemLabel =
               item.kind === 'image'
                 ? 'image'
@@ -2808,10 +3207,15 @@ export default function BoardApp() {
                 }
               >
                 <div
+                  ref={(element) => {
+                    if (element) itemFrameRefsRef.current.set(item.id, element);
+                    else itemFrameRefsRef.current.delete(item.id);
+                  }}
                   className={`canvas-item-frame${isSelected ? ' is-selected' : ''}`}
                   style={frameStyle}
                   role="group"
                   tabIndex={0}
+                  aria-busy={isRemovingBackground || undefined}
                   aria-label={
                     item.kind === 'image'
                       ? item.name
@@ -2855,7 +3259,7 @@ export default function BoardApp() {
                   {item.kind === 'image' ? (
                     <img
                       className="canvas-image"
-                      src={item.src}
+                      src={activeImageSource(item)}
                       alt={item.name}
                       draggable={false}
                     />
@@ -2882,8 +3286,17 @@ export default function BoardApp() {
                       color={item.color}
                       filled={item.filled}
                       shape={item.shape}
-                    />
-                  )}
+                      />
+                    )}
+
+                  {isRemovingBackground ? (
+                    <span
+                      className="background-removal-indicator"
+                      aria-hidden="true"
+                    >
+                      <span />
+                    </span>
+                  ) : null}
 
                   {isSelected ? (
                     <>
@@ -3129,27 +3542,82 @@ export default function BoardApp() {
                           data-item-menu={item.id}
                           onPointerDown={(event) => event.stopPropagation()}
                           onDoubleClick={(event) => event.stopPropagation()}
-                        >
-                        <button
-                          type="button"
-                          className="item-menu-button"
-                          aria-label={`${itemLabel} options`}
-                          aria-expanded={isMenuOpen}
-                          aria-haspopup="menu"
-                          onClick={() =>
+                          onBlur={(event) => {
+                            const nextFocused = event.relatedTarget;
+                            if (
+                              nextFocused instanceof Node &&
+                              event.currentTarget.contains(nextFocused)
+                            ) {
+                              return;
+                            }
                             setOpenItemMenuId((current) =>
-                              current === item.id ? null : item.id,
-                            )
-                          }
+                              current === item.id ? null : current,
+                            );
+                          }}
                         >
-                          <MoreVertical aria-hidden="true" />
-                        </button>
+                          <button
+                            ref={(element) => {
+                              if (element) {
+                                itemMenuButtonRefsRef.current.set(
+                                  item.id,
+                                  element,
+                                );
+                              } else {
+                                itemMenuButtonRefsRef.current.delete(item.id);
+                              }
+                            }}
+                            type="button"
+                            className="item-menu-button"
+                            aria-label={`${itemLabel} options`}
+                            aria-expanded={isMenuOpen}
+                            aria-haspopup="menu"
+                            aria-controls={
+                              isMenuOpen ? `item-menu-${item.id}` : undefined
+                            }
+                            onClick={(event) => {
+                              const opening = openItemMenuId !== item.id;
+                              focusItemMenuOnOpenRef.current =
+                                opening && event.detail === 0;
+                              setOpenItemMenuId((current) =>
+                                current === item.id ? null : item.id,
+                              );
+                            }}
+                          >
+                            <MoreVertical aria-hidden="true" />
+                          </button>
 
-                        {isMenuOpen ? (
-                          <div className="item-menu-popover" role="menu">
+                          {isMenuOpen ? (
+                            <div
+                            id={`item-menu-${item.id}`}
+                            className="item-menu-popover"
+                            role="menu"
+                            aria-label={`${itemLabel} options`}
+                            onFocus={(event) => {
+                              if (event.target instanceof HTMLButtonElement) {
+                                setItemMenuTabStop(
+                                  event.currentTarget,
+                                  event.target,
+                                );
+                              }
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Tab') {
+                                setOpenItemMenuId(null);
+                                if (event.shiftKey) {
+                                  event.preventDefault();
+                                  itemMenuButtonRefsRef.current
+                                    .get(item.id)
+                                    ?.focus({ preventScroll: true });
+                                }
+                                return;
+                              }
+                              moveItemMenuFocus(event);
+                            }}
+                          >
                             <button
                               type="button"
                               role="menuitem"
+                              tabIndex={0}
                               onClick={() => duplicateItem(item)}
                             >
                               <CopyPlus aria-hidden="true" />
@@ -3158,6 +3626,7 @@ export default function BoardApp() {
                             <button
                               type="button"
                               role="menuitem"
+                              tabIndex={-1}
                               onClick={() => copyItem(item)}
                             >
                               <Copy aria-hidden="true" />
@@ -3167,6 +3636,7 @@ export default function BoardApp() {
                               <button
                                 type="button"
                                 role="menuitem"
+                                tabIndex={-1}
                                 onClick={() => toggleShapeFill(item.id)}
                               >
                                 <PaintBucket aria-hidden="true" />
@@ -3175,10 +3645,29 @@ export default function BoardApp() {
                                   : 'Remove fill'}
                               </button>
                             ) : null}
+                            {item.kind === 'image' &&
+                            BACKGROUND_REMOVAL_ENABLED ? (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                tabIndex={-1}
+                                disabled={isRemovingBackground}
+                                onClick={() => toggleImageBackground(item)}
+                              >
+                                <ImageOff aria-hidden="true" />
+                                {isRemovingBackground
+                                  ? 'Removing background…'
+                                  : item.backgroundRemoved === true &&
+                                      item.backgroundRemovedSrc
+                                    ? 'Restore background'
+                                    : 'Remove background'}
+                              </button>
+                            ) : null}
                             <span className="item-menu-divider" aria-hidden="true" />
                             <button
                               type="button"
                               role="menuitem"
+                              tabIndex={-1}
                               onClick={() => rotateItem(item.id, -15)}
                             >
                               <RotateCcw aria-hidden="true" />
@@ -3187,6 +3676,7 @@ export default function BoardApp() {
                             <button
                               type="button"
                               role="menuitem"
+                              tabIndex={-1}
                               onClick={() => rotateItem(item.id, 15)}
                             >
                               <RotateCw aria-hidden="true" />
@@ -3196,14 +3686,15 @@ export default function BoardApp() {
                             <button
                               type="button"
                               role="menuitem"
+                              tabIndex={-1}
                               className="delete-item-action"
                               onClick={() => deleteItem(item.id)}
                             >
                               <Trash2 aria-hidden="true" />
                               Delete {itemLabel}
                             </button>
-                          </div>
-                        ) : null}
+                            </div>
+                          ) : null}
                         </div>
                       ) : null}
                     </>

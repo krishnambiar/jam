@@ -18,3 +18,16 @@ class HealthResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     service: ServiceInfo = Field(default_factory=ServiceInfo)
+
+
+class ApiErrorDetail(BaseModel):
+    """Stable machine-readable API error exposed to the frontend."""
+
+    code: str
+    message: str
+
+
+class ApiErrorResponse(BaseModel):
+    """Envelope used for background-removal failures."""
+
+    detail: ApiErrorDetail
