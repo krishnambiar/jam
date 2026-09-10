@@ -114,12 +114,42 @@ export const shapeColors: ReadonlyArray<{
   stroke: string;
   fill: string;
 }> = [
-  { id: 'charcoal', label: 'Charcoal', stroke: '#3c4043', fill: '#e8eaed' },
-  { id: 'blue', label: 'Blue', stroke: '#4285f4', fill: '#e8f0fe' },
-  { id: 'green', label: 'Green', stroke: '#34a853', fill: '#e6f4ea' },
-  { id: 'yellow', label: 'Yellow', stroke: '#f9ab00', fill: '#fef7e0' },
-  { id: 'red', label: 'Red', stroke: '#ea4335', fill: '#fce8e6' },
-  { id: 'white', label: 'White', stroke: '#9aa0a6', fill: '#ffffff' },
+  {
+    id: 'charcoal',
+    label: 'Black',
+    stroke: getDrawingColorValue('charcoal'),
+    fill: '#e9eaea',
+  },
+  {
+    id: 'blue',
+    label: 'Blue',
+    stroke: getDrawingColorValue('cyan'),
+    fill: '#e5f5f7',
+  },
+  {
+    id: 'green',
+    label: 'Green',
+    stroke: getDrawingColorValue('green'),
+    fill: '#edf4e8',
+  },
+  {
+    id: 'white',
+    label: 'White',
+    stroke: getDrawingColorValue('white'),
+    fill: '#ffffff',
+  },
+  {
+    id: 'yellow',
+    label: 'Yellow',
+    stroke: getDrawingColorValue('yellow'),
+    fill: '#fdf5df',
+  },
+  {
+    id: 'red',
+    label: 'Red',
+    stroke: getDrawingColorValue('red'),
+    fill: '#f9e9e7',
+  },
 ];
 
 export function getShapeOption(shape: ShapeType) {

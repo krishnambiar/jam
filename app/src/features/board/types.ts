@@ -69,6 +69,7 @@ export type CanvasShape = CanvasTransform & {
   shape: ShapeType;
   color: ShapeColor;
   arrowDirection?: ArrowDirection;
+  filled?: boolean;
 };
 
 export type DrawingStyle = 'pen' | 'marker' | 'highlighter' | 'brush';

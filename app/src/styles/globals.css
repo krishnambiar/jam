@@ -816,7 +816,7 @@ select {
 }
 
 .canvas-item[data-item-type='shape'] .shape-geometry {
-  pointer-events: visiblePainted;
+  pointer-events: visible;
 }
 
 .canvas-item[data-item-type='shape'] .rounded-rectangle-geometry,
@@ -977,7 +977,7 @@ select {
 }
 
 .resize-handle,
-.rotation-handle {
+.rotation-zone {
   position: absolute;
   display: block;
   margin: 0;
@@ -986,57 +986,21 @@ select {
   touch-action: none;
 }
 
-.rotation-handle {
-  z-index: 5;
-  top: calc(-22px + var(--rotation-handle-shift-y, 0px));
-  left: calc(50% + var(--rotation-handle-shift-x, 0px));
-  display: grid;
-  width: 24px;
-  height: 24px;
-  place-items: center;
-  border: 2px solid #fff;
+.rotation-zone {
+  z-index: 3;
+  top: 0;
+  left: 0;
+  width: 38px;
+  height: 38px;
+  border: 0;
   outline: none;
-  color: #fff;
-  background: #669df6;
-  box-shadow: 0 1px 3px rgb(60 64 67 / 28%);
+  background: transparent;
   cursor: grab;
   transform: translate(-50%, -50%);
 }
 
-.rotation-handle::after {
-  position: absolute;
-  z-index: -1;
-  top: 21px;
-  left: 50%;
-  width: 2px;
-  height: 13px;
-  background: #669df6;
-  content: '';
-  transform: translateX(-50%);
-}
-
-.rotation-handle.is-below {
-  top: calc(100% + 22px + var(--rotation-handle-shift-y, 0px));
-}
-
-.rotation-handle.is-below::after {
-  top: auto;
-  bottom: 21px;
-}
-
-.rotation-handle.is-shifted::after {
-  display: none;
-}
-
-.rotation-handle svg {
-  width: 13px;
-  height: 13px;
-  stroke-width: 2.5;
-  transform: rotate(var(--counter-rotation));
-}
-
-.rotation-handle:focus-visible {
-  box-shadow: 0 0 0 2px #202124, 0 1px 3px rgb(60 64 67 / 28%);
+.rotation-zone:focus-visible {
+  box-shadow: 0 0 0 2px #202124;
 }
 
 .resize-handle {

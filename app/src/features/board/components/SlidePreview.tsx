@@ -39,6 +39,7 @@ export function SlidePreview({ items }: SlidePreviewProps) {
               <ShapeContent
                 arrowDirection={item.arrowDirection}
                 color={item.color}
+                filled={item.filled}
                 shape={item.shape}
               />
             )}

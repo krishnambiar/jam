@@ -6,6 +6,7 @@ import type { ArrowDirection, ShapeColor, ShapeType } from '../types';
 type ShapeContentProps = {
   arrowDirection?: ArrowDirection;
   color?: ShapeColor;
+  filled?: boolean;
   icon?: boolean;
   shape: ShapeType;
 };
@@ -13,12 +14,13 @@ type ShapeContentProps = {
 export function ShapeContent({
   arrowDirection = 'right',
   color = 'charcoal',
+  filled = true,
   icon = false,
   shape,
 }: ShapeContentProps) {
   const palette = getShapeColorValue(color);
   const style = {
-    '--shape-fill-color': icon ? 'none' : palette.fill,
+    '--shape-fill-color': icon || !filled ? 'none' : palette.fill,
     '--shape-stroke-color': icon ? '#3c4043' : palette.stroke,
   } as CSSProperties;
   const commonProps = {

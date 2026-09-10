@@ -6,6 +6,7 @@ import {
   Copy,
   CopyPlus,
   MoreVertical,
+  PaintBucket,
   Plus,
   Redo2,
   RotateCcw,
@@ -148,13 +149,6 @@ type PendingShape = {
   shape: CanvasShape;
 };
 
-type BoardSize = {
-  width: number;
-  height: number;
-};
-
-type RotationHandleSide = 'top' | 'bottom';
-
 const ITEM_CLIPBOARD_TYPE = 'application/x-untitled-jam-item';
 
 function clipboardLabel(item: TransformableCanvasItem) {
@@ -183,7 +177,8 @@ function isClipboardItem(value: unknown): value is TransformableCanvasItem {
       getShapeOption(item.shape as ShapeType).id === item.shape &&
       (item.arrowDirection === undefined ||
         item.arrowDirection === 'left' ||
-        item.arrowDirection === 'right')
+        item.arrowDirection === 'right') &&
+      (item.filled === undefined || typeof item.filled === 'boolean')
     );
   }
   if (item.kind === 'sticky-note') {
@@ -310,83 +305,6 @@ function copiedItemPosition(
   return { x: source.x, y: source.y };
 }
 
-function rotationHandlePlacement(
-  item: TransformableCanvasItem,
-  boardSize: BoardSize,
-  preferredSide?: RotationHandleSide,
-) {
-  const radians = (item.rotation * Math.PI) / 180;
-  const cosine = Math.cos(radians);
-  const sine = Math.sin(radians);
-  const horizontalScale = Math.max(0.001, boardSize.width / BOARD_WIDTH);
-  const verticalScale = Math.max(0.001, boardSize.height / BOARD_HEIGHT);
-  const distanceFromCenter = item.height * verticalScale / 2 + 22;
-  const controlExtent = 16;
-  const center = {
-    x: item.x * horizontalScale,
-    y: item.y * verticalScale,
-  };
-
-  const candidates = [
-    {
-      side: 'top' as const,
-      className: '',
-      point: {
-        x: center.x + sine * distanceFromCenter,
-        y: center.y - cosine * distanceFromCenter,
-      },
-    },
-    {
-      side: 'bottom' as const,
-      className: ' is-below',
-      point: {
-        x: center.x - sine * distanceFromCenter,
-        y: center.y + cosine * distanceFromCenter,
-      },
-    },
-  ].map((candidate) => {
-    const clampedPoint = {
-      x: clamp(
-        candidate.point.x,
-        controlExtent,
-        boardSize.width - controlExtent,
-      ),
-      y: clamp(
-        candidate.point.y,
-        controlExtent,
-        boardSize.height - controlExtent,
-      ),
-    };
-    const screenShift = {
-      x: clampedPoint.x - candidate.point.x,
-      y: clampedPoint.y - candidate.point.y,
-    };
-
-    return {
-      ...candidate,
-      distance: Math.hypot(screenShift.x, screenShift.y),
-      localShift: {
-        x: screenShift.x * cosine + screenShift.y * sine,
-        y: -screenShift.x * sine + screenShift.y * cosine,
-      },
-    };
-  });
-  const placement = preferredSide
-    ? candidates.find((candidate) => candidate.side === preferredSide)!
-    : candidates[1].distance < candidates[0].distance
-      ? candidates[1]
-      : candidates[0];
-  const shifted = placement.distance > 0.5;
-
-  return {
-    className: `${placement.className}${shifted ? ' is-shifted' : ''}`,
-    style: {
-      '--rotation-handle-shift-x': `${placement.localShift.x}px`,
-      '--rotation-handle-shift-y': `${placement.localShift.y}px`,
-    } as CSSProperties,
-  };
-}
-
 export default function BoardApp() {
   const [selectedToolId, setSelectedToolId] = useState<Tool['id']>('select');
   const [drawingStyle, setDrawingStyle] = useState<DrawingStyle>('pen');
@@ -397,8 +315,6 @@ export default function BoardApp() {
     useState<ShapeColor>('charcoal');
   const [isShapeMenuOpen, setIsShapeMenuOpen] = useState(false);
   const [focusShapeMenuSelection, setFocusShapeMenuSelection] = useState(false);
-  const [rotationHandleLock, setRotationHandleLock] =
-    useState<{ itemId: string; side: RotationHandleSide } | null>(null);
   const [pendingStroke, setPendingStroke] = useState<CanvasStroke | null>(null);
   const [pendingShape, setPendingShape] = useState<PendingShape | null>(null);
   const [pendingErase, setPendingErase] = useState<PendingErase | null>(null);
@@ -427,10 +343,6 @@ export default function BoardApp() {
     useState<PendingStickyNote | null>(null);
   const [openSlideMenuId, setOpenSlideMenuId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [boardSize, setBoardSize] = useState<BoardSize>({
-    width: BOARD_WIDTH,
-    height: BOARD_HEIGHT,
-  });
   const boardRef = useRef<HTMLDivElement>(null);
   const overviewViewportRef = useRef<HTMLDivElement>(null);
   const activeThumbnailRef = useRef<HTMLButtonElement>(null);
@@ -456,24 +368,6 @@ export default function BoardApp() {
   const activeSlideIdRef = useRef(deck.activeSlideId);
   const wasSlideOverviewOpenRef = useRef(false);
   const overviewReturnFocusRef = useRef<'counter' | 'canvas'>('counter');
-
-  useLayoutEffect(() => {
-    const board = boardRef.current;
-    if (!board) return;
-
-    const updateBoardSize = () => {
-      const next = { width: board.clientWidth, height: board.clientHeight };
-      setBoardSize((current) =>
-        current.width === next.width && current.height === next.height
-          ? current
-          : next,
-      );
-    };
-    const observer = new ResizeObserver(updateBoardSize);
-    updateBoardSize();
-    observer.observe(board);
-    return () => observer.disconnect();
-  }, []);
 
   const closeDrawingMenu = useCallback((restoreFocus = false) => {
     setIsDrawingMenuOpen(false);
@@ -606,7 +500,6 @@ export default function BoardApp() {
   const cancelActiveGesture = useCallback(() => {
     const gesture = gestureRef.current;
     gestureRef.current = null;
-    setRotationHandleLock(null);
     if (!gesture || (!gesture.moved && !gesture.broughtToFront)) return;
 
     setDeck((current) => ({
@@ -806,6 +699,20 @@ export default function BoardApp() {
         items.map((item) =>
           item.id === itemId && item.kind !== 'stroke'
             ? { ...item, rotation: normalizeRotation(item.rotation + degrees) }
+            : item,
+        ),
+      );
+      setOpenItemMenuId(null);
+    },
+    [commit],
+  );
+
+  const toggleShapeFill = useCallback(
+    (itemId: string) => {
+      commit((items) =>
+        items.map((item) =>
+          item.id === itemId && item.kind === 'shape'
+            ? { ...item, filled: !(item.filled ?? true) }
             : item,
         ),
       );
@@ -1645,16 +1552,6 @@ export default function BoardApp() {
     const lastItemIndex = history.present.length - 1;
     const broughtToFront =
       initialIndex >= 0 && initialIndex !== lastItemIndex;
-    setRotationHandleLock(
-      kind === 'rotate'
-        ? {
-            itemId: itemAtStart.id,
-            side: event.currentTarget.classList.contains('is-below')
-              ? 'bottom'
-              : 'top',
-          }
-        : null,
-    );
 
     gestureRef.current = {
       kind,
@@ -1779,7 +1676,6 @@ export default function BoardApp() {
     if (!gesture || gesture.pointerId !== event.pointerId) return;
 
     gestureRef.current = null;
-    setRotationHandleLock(null);
     if (!gesture.moved && !gesture.broughtToFront) return;
 
     setDeckHistory((current) => {
@@ -2258,6 +2154,7 @@ export default function BoardApp() {
       shape: activeShape,
       color: activeShapeColor,
       arrowDirection: 'right',
+      filled: true,
       x: startPoint.x,
       y: startPoint.y,
       width: 0,
@@ -2880,13 +2777,6 @@ export default function BoardApp() {
               transform: `rotate(${item.rotation}deg)`,
               '--counter-rotation': `${-item.rotation}deg`,
             } as CSSProperties;
-            const rotationHandle = rotationHandlePlacement(
-              item,
-              boardSize,
-              rotationHandleLock?.itemId === item.id
-                ? rotationHandleLock.side
-                : undefined,
-            );
 
             return (
               <div
@@ -2990,6 +2880,7 @@ export default function BoardApp() {
                     <ShapeContent
                       arrowDirection={item.arrowDirection}
                       color={item.color}
+                      filled={item.filled}
                       shape={item.shape}
                     />
                   )}
@@ -3001,16 +2892,13 @@ export default function BoardApp() {
                         <>
                           <button
                             type="button"
-                            className={`rotation-handle${rotationHandle.className}`}
-                            style={rotationHandle.style}
+                            className="rotation-zone"
                             aria-label={`Rotate ${itemLabel}`}
                             title={`Drag around the ${itemLabel} to rotate. Hold Shift to snap.`}
                             onPointerDown={(event) =>
                               startGesture(event, item, 'rotate')
                             }
-                          >
-                            <RotateCw aria-hidden="true" />
-                          </button>
+                          />
 
                           {resizeCorners.map((corner) => (
                             <button
@@ -3163,7 +3051,10 @@ export default function BoardApp() {
                                   style={
                                     {
                                       '--note-swatch-color': color.fill,
-                                      '--shape-swatch-stroke': color.stroke,
+                                      '--shape-swatch-stroke':
+                                        color.id === 'white'
+                                          ? '#bdc1c6'
+                                          : color.stroke,
                                     } as CSSProperties
                                   }
                                   onClick={() =>
@@ -3210,12 +3101,19 @@ export default function BoardApp() {
                               }}
                             >
                               <span
+                                className={
+                                  item.filled === false
+                                    ? 'is-no-fill'
+                                    : undefined
+                                }
                                 style={{
                                   backgroundColor: getShapeColorValue(
                                     item.color,
                                   ).fill,
                                   boxShadow: `inset 0 0 0 2px ${
-                                    getShapeColorValue(item.color).stroke
+                                    item.color === 'white'
+                                      ? '#bdc1c6'
+                                      : getShapeColorValue(item.color).stroke
                                   }`,
                                 }}
                                 aria-hidden="true"
@@ -3265,6 +3163,18 @@ export default function BoardApp() {
                               <Copy aria-hidden="true" />
                               Copy {itemLabel}
                             </button>
+                            {item.kind === 'shape' ? (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                onClick={() => toggleShapeFill(item.id)}
+                              >
+                                <PaintBucket aria-hidden="true" />
+                                {item.filled === false
+                                  ? 'Add fill'
+                                  : 'Remove fill'}
+                              </button>
+                            ) : null}
                             <span className="item-menu-divider" aria-hidden="true" />
                             <button
                               type="button"
