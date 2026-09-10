@@ -14,6 +14,7 @@ import type {
   EraserTrace,
   Point,
   ResizeCorner,
+  ResizeSide,
   SlideDeck,
   StrokePoint,
 } from './types';
@@ -524,6 +525,47 @@ export function resizedItem<T extends CanvasTransform>(
     y: (fixedCorner.y + draggedCorner.y) / 2,
     width: nextWidth,
     height: nextHeight,
+  };
+}
+
+export function resizedItemWidth<T extends CanvasTransform>(
+  item: T,
+  side: ResizeSide,
+  pointer: Point,
+  minimumWidth = MIN_ITEM_SIZE,
+): T {
+  const horizontalSign = side === 'e' ? 1 : -1;
+  const fixedOffset = rotateVector(
+    { x: (-horizontalSign * item.width) / 2, y: 0 },
+    item.rotation,
+  );
+  const fixedSide = {
+    x: item.x + fixedOffset.x,
+    y: item.y + fixedOffset.y,
+  };
+  const pointerFromFixed = rotateVector(
+    { x: pointer.x - fixedSide.x, y: pointer.y - fixedSide.y },
+    -item.rotation,
+  );
+  const nextWidth = clamp(
+    pointerFromFixed.x * horizontalSign,
+    minimumWidth,
+    BOARD_WIDTH * 2,
+  );
+  const draggedOffset = rotateVector(
+    { x: horizontalSign * nextWidth, y: 0 },
+    item.rotation,
+  );
+  const draggedSide = {
+    x: fixedSide.x + draggedOffset.x,
+    y: fixedSide.y + draggedOffset.y,
+  };
+
+  return {
+    ...item,
+    x: (fixedSide.x + draggedSide.x) / 2,
+    y: (fixedSide.y + draggedSide.y) / 2,
+    width: nextWidth,
   };
 }
 

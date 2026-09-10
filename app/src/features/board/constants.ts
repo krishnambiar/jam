@@ -16,6 +16,8 @@ import type {
   ShapeType,
   Slide,
   StickyNoteColor,
+  TextBoxColor,
+  TextBoxStyle,
   Tool,
 } from './types';
 
@@ -24,6 +26,9 @@ export const BOARD_HEIGHT = 900;
 export const MIN_ITEM_SIZE = 56;
 export const MIN_SHAPE_DRAW_SIZE = 8;
 export const STICKY_NOTE_SIZE = 280;
+export const TEXT_BOX_DEFAULT_WIDTH = 420;
+export const TEXT_BOX_MIN_WIDTH = 120;
+export const TEXT_BOX_MIN_HEIGHT = 42;
 export const HISTORY_LIMIT = 100;
 export const MAX_SLIDES = 20;
 export const INITIAL_SLIDE_ID = 'slide-1';
@@ -158,6 +163,59 @@ export function getShapeOption(shape: ShapeType) {
 
 export function getShapeColorValue(color: ShapeColor) {
   return shapeColors.find((option) => option.id === color) ?? shapeColors[0];
+}
+
+export const textBoxStyles: ReadonlyArray<{
+  id: TextBoxStyle;
+  label: string;
+  fontSize: number;
+  fontWeight: number;
+  lineHeight: number;
+}> = [
+  {
+    id: 'display',
+    label: 'Display',
+    fontSize: 52,
+    fontWeight: 500,
+    lineHeight: 1.12,
+  },
+  {
+    id: 'normal',
+    label: 'Normal',
+    fontSize: 30,
+    fontWeight: 400,
+    lineHeight: 1.28,
+  },
+  {
+    id: 'caption',
+    label: 'Caption',
+    fontSize: 20,
+    fontWeight: 400,
+    lineHeight: 1.35,
+  },
+];
+
+export const textBoxColors: ReadonlyArray<{
+  id: TextBoxColor;
+  label: string;
+  value: string;
+}> = [
+  { id: 'charcoal', label: 'Black', value: '#202124' },
+  { id: 'blue', label: 'Blue', value: '#1a73e8' },
+  { id: 'green', label: 'Green', value: '#188038' },
+  { id: 'yellow', label: 'Yellow', value: '#f9ab00' },
+  { id: 'red', label: 'Red', value: '#d93025' },
+];
+
+export function getTextBoxStyle(style: TextBoxStyle) {
+  return textBoxStyles.find((option) => option.id === style) ?? textBoxStyles[1];
+}
+
+export function getTextBoxColorValue(color: TextBoxColor) {
+  return (
+    textBoxColors.find((option) => option.id === color)?.value ??
+    textBoxColors[0].value
+  );
 }
 
 export const resizeCorners: ResizeCorner[] = ['nw', 'ne', 'sw', 'se'];

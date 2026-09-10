@@ -1,4 +1,8 @@
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
+  BringToFront,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -12,6 +16,7 @@ import {
   Redo2,
   RotateCcw,
   RotateCw,
+  SendToBack,
   Trash2,
   Undo2,
   UserRound,
@@ -37,6 +42,7 @@ import { SlidePreview } from './components/SlidePreview';
 import { ShapeContent } from './components/ShapeContent';
 import { ShapeMenu } from './components/ShapeMenu';
 import { StickyNoteContent } from './components/StickyNoteContent';
+import { TextBoxContent } from './components/TextBoxContent';
 import { ToolButton } from './components/ToolButton';
 import {
   BACKGROUND_REMOVAL_ENABLED,
@@ -54,6 +60,9 @@ import {
   MAX_SLIDES,
   MIN_SHAPE_DRAW_SIZE,
   STICKY_NOTE_SIZE,
+  TEXT_BOX_DEFAULT_WIDTH,
+  TEXT_BOX_MIN_HEIGHT,
+  TEXT_BOX_MIN_WIDTH,
   createEmptySlide,
   getStickyNoteColorValue,
   getShapeColorValue,
@@ -61,6 +70,8 @@ import {
   resizeCorners,
   shapeColors,
   stickyNoteColors,
+  textBoxColors,
+  textBoxStyles,
   tools,
 } from './constants';
 import type {
@@ -70,6 +81,7 @@ import type {
   CanvasShape,
   CanvasStickyNote,
   CanvasStroke,
+  CanvasTextBox,
   DeckHistoryState,
   DrawingColor,
   DrawingStyle,
@@ -79,11 +91,15 @@ import type {
   HistoryState,
   Point,
   ResizeCorner,
+  ResizeSide,
   ShapeColor,
   ShapeType,
   SlideDeck,
   StrokePoint,
   StickyNoteColor,
+  TextBoxAlignment,
+  TextBoxColor,
+  TextBoxStyle,
   Tool,
   TransformableCanvasItem,
 } from './types';
@@ -101,6 +117,7 @@ import {
   isTextEntry,
   normalizeRotation,
   resizedItem,
+  resizedItemWidth,
   rotatedItemExtents,
   type EraserSweep,
 } from './utils';
@@ -116,6 +133,19 @@ type PendingStickyNote = {
   note: CanvasStickyNote;
   slideId: string;
   discarding: boolean;
+};
+
+type TextBoxEdit = {
+  itemId: string;
+  slideId: string;
+  draft: string;
+  height: number;
+  isNew: boolean;
+};
+
+type PendingTextBox = {
+  box: CanvasTextBox;
+  slideId: string;
 };
 
 type InkGesture = {
@@ -179,6 +209,7 @@ function clipboardLabel(item: TransformableCanvasItem) {
     return `Untitled Jam ${getShapeOption(item.shape).label} shape`;
   }
   if (item.kind === 'sticky-note') return 'Untitled Jam sticky note';
+  if (item.kind === 'text-box') return `Untitled Jam text: ${item.text}`;
   return `Untitled Jam image: ${item.name}`;
 }
 
@@ -210,6 +241,19 @@ function isClipboardItem(value: unknown): value is TransformableCanvasItem {
       stickyNoteColors.some((color) => color.id === item.color)
     );
   }
+  if (item.kind === 'text-box') {
+    return (
+      typeof item.text === 'string' &&
+      textBoxStyles.some((style) => style.id === item.style) &&
+      textBoxColors.some((color) => color.id === item.color) &&
+      (item.alignment === 'left' ||
+        item.alignment === 'center' ||
+        item.alignment === 'right') &&
+      typeof item.scale === 'number' &&
+      Number.isFinite(item.scale) &&
+      item.scale > 0
+    );
+  }
   return (
     item.kind === 'image' &&
     typeof item.src === 'string' &&
@@ -222,6 +266,34 @@ function isClipboardItem(value: unknown): value is TransformableCanvasItem {
       (typeof item.backgroundRemovedSrc === 'string' &&
         item.backgroundRemovedSrc.length > 0))
   );
+}
+
+function textBoxWithHeight(box: CanvasTextBox, height: number) {
+  const nextHeight = Math.max(TEXT_BOX_MIN_HEIGHT * box.scale, height);
+  if (Math.abs(nextHeight - box.height) < 0.1) return box;
+  const offset = (nextHeight - box.height) / 2;
+  const radians = (box.rotation * Math.PI) / 180;
+  const anchoredBox = {
+    ...box,
+    x: box.x - Math.sin(radians) * offset,
+    y: box.y + Math.cos(radians) * offset,
+    height: nextHeight,
+  };
+  const extents = rotatedItemExtents(anchoredBox);
+
+  return {
+    ...anchoredBox,
+    x: clamp(
+      anchoredBox.x,
+      extents.horizontal,
+      BOARD_WIDTH - extents.horizontal,
+    ),
+    y: clamp(
+      anchoredBox.y,
+      extents.vertical,
+      BOARD_HEIGHT - extents.vertical,
+    ),
+  };
 }
 
 function moveColorChoiceFocus(event: ReactKeyboardEvent<HTMLButtonElement>) {
@@ -242,11 +314,13 @@ function moveColorChoiceFocus(event: ReactKeyboardEvent<HTMLButtonElement>) {
   else if (direction !== 0 && choices.length > 0) {
     nextIndex = (nextIndex + direction + choices.length) % choices.length;
   } else {
-    return;
+    return null;
   }
 
   event.preventDefault();
-  choices[nextIndex]?.focus();
+  const nextChoice = choices[nextIndex] ?? null;
+  nextChoice?.focus();
+  return nextChoice;
 }
 
 function itemMenuChoices(menu: HTMLElement) {
@@ -295,6 +369,22 @@ function bringItemToFront(items: CanvasItem[], itemId: string) {
     ...items.slice(itemIndex + 1),
     items[itemIndex],
   ];
+}
+
+function moveItemInLayer(
+  items: CanvasItem[],
+  itemId: string,
+  direction: -1 | 1,
+) {
+  const itemIndex = items.findIndex((item) => item.id === itemId);
+  const targetIndex = itemIndex + direction;
+  if (itemIndex < 0 || targetIndex < 0 || targetIndex >= items.length) {
+    return items;
+  }
+
+  const next = [...items];
+  [next[itemIndex], next[targetIndex]] = [next[targetIndex], next[itemIndex]];
+  return next;
 }
 
 function restoreGestureStart(items: CanvasItem[], gesture: Gesture) {
@@ -408,6 +498,9 @@ export default function BoardApp() {
   );
   const [pendingStickyNote, setPendingStickyNote] =
     useState<PendingStickyNote | null>(null);
+  const [textBoxEdit, setTextBoxEdit] = useState<TextBoxEdit | null>(null);
+  const [pendingTextBox, setPendingTextBox] =
+    useState<PendingTextBox | null>(null);
   const [openSlideMenuId, setOpenSlideMenuId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [backgroundRemovalJobKeys, setBackgroundRemovalJobKeys] = useState<
@@ -427,6 +520,7 @@ export default function BoardApp() {
   const focusColorPickerOnOpenRef = useRef(false);
   const focusItemMenuOnOpenRef = useRef(false);
   const finishingStickyNoteIdRef = useRef<string | null>(null);
+  const finishingTextBoxIdRef = useRef<string | null>(null);
   const stickyNoteDiscardTimersRef = useRef<number[]>([]);
   const gestureRef = useRef<Gesture | null>(null);
   const backgroundRemovalJobsRef = useRef<Map<string, BackgroundRemovalJob>>(
@@ -763,6 +857,8 @@ export default function BoardApp() {
     setOpenColorPickerId(null);
     setStickyNoteEdit(null);
     setPendingStickyNote(null);
+    setTextBoxEdit(null);
+    setPendingTextBox(null);
     closeSlideMenu(openSlideMenuId !== null);
     setSelectedItemId(null);
     setDeckHistory((current) => {
@@ -798,6 +894,8 @@ export default function BoardApp() {
     setOpenColorPickerId(null);
     setStickyNoteEdit(null);
     setPendingStickyNote(null);
+    setTextBoxEdit(null);
+    setPendingTextBox(null);
     closeSlideMenu(openSlideMenuId !== null);
     setSelectedItemId(null);
     setDeckHistory((current) => {
@@ -841,6 +939,8 @@ export default function BoardApp() {
       setOpenColorPickerId(null);
       setStickyNoteEdit(null);
       setPendingStickyNote(null);
+      setTextBoxEdit(null);
+      setPendingTextBox(null);
       closeSlideMenu();
       setDeckHistory((current) => {
         if (current.present.slides.length <= 1) return current;
@@ -886,6 +986,8 @@ export default function BoardApp() {
       setOpenColorPickerId(null);
       setStickyNoteEdit(null);
       setPendingStickyNote(null);
+      setTextBoxEdit(null);
+      setPendingTextBox(null);
       closeSlideMenu();
       setDeck((current) => {
         const currentIndex = current.slides.findIndex(
@@ -923,6 +1025,12 @@ export default function BoardApp() {
       setPendingStickyNote((current) =>
         current?.note.id === itemId ? null : current,
       );
+      setTextBoxEdit((current) =>
+        current?.itemId === itemId ? null : current,
+      );
+      setPendingTextBox((current) =>
+        current?.box.id === itemId ? null : current,
+      );
     },
     [cancelBackgroundRemovalJob, commit],
   );
@@ -937,6 +1045,19 @@ export default function BoardApp() {
         ),
       );
       setOpenItemMenuId(null);
+    },
+    [commit],
+  );
+
+  const moveItemLayer = useCallback(
+    (itemId: string, direction: -1 | 1) => {
+      commit((items) => moveItemInLayer(items, itemId, direction));
+      setOpenItemMenuId(null);
+      setNotice(
+        direction > 0
+          ? 'Text box moved forward.'
+          : 'Text box moved backward.',
+      );
     },
     [commit],
   );
@@ -1065,6 +1186,8 @@ export default function BoardApp() {
       setSelectedItemId(id);
       setOpenItemMenuId(null);
       setOpenColorPickerId(null);
+      setTextBoxEdit(null);
+      setPendingTextBox(null);
       setNotice(message);
     },
     [cancelActiveMarking, closeDrawingMenu, closeShapeMenu, commit],
@@ -1074,7 +1197,13 @@ export default function BoardApp() {
     (item: TransformableCanvasItem) => {
       addCopiedItem(
         item,
-        `${item.kind === 'shape' ? 'Shape' : 'Object'} duplicated.`,
+        `${
+          item.kind === 'shape'
+            ? 'Shape'
+            : item.kind === 'text-box'
+              ? 'Text box'
+              : 'Object'
+        } duplicated.`,
       );
     },
     [addCopiedItem],
@@ -1098,7 +1227,13 @@ export default function BoardApp() {
 
     copiedItemInternalOnlyRef.current = true;
     setNotice(
-      `${item.kind === 'shape' ? 'Shape' : 'Object'} copied in this board.`,
+      `${
+        item.kind === 'shape'
+          ? 'Shape'
+          : item.kind === 'text-box'
+            ? 'Text box'
+            : 'Object'
+      } copied in this board.`,
     );
     if (!navigator.clipboard?.writeText) {
       return;
@@ -1108,7 +1243,15 @@ export default function BoardApp() {
       () => {
         if (copiedItemRef.current !== internalCopy) return;
         copiedItemInternalOnlyRef.current = false;
-        setNotice(`${item.kind === 'shape' ? 'Shape' : 'Object'} copied.`);
+        setNotice(
+          `${
+            item.kind === 'shape'
+              ? 'Shape'
+              : item.kind === 'text-box'
+                ? 'Text box'
+                : 'Object'
+          } copied.`,
+        );
       },
       () => {
         if (copiedItemRef.current !== internalCopy) return;
@@ -1260,6 +1403,254 @@ export default function BoardApp() {
     });
   }, [cancelActiveGesture, deck.activeSlideId, finishStickyNoteEdit]);
 
+  const finishTextBoxEdit = useCallback(() => {
+    if (!textBoxEdit) return;
+    if (finishingTextBoxIdRef.current === textBoxEdit.itemId) return;
+    finishingTextBoxIdRef.current = textBoxEdit.itemId;
+    setTextBoxEdit(null);
+    window.queueMicrotask(() => {
+      if (finishingTextBoxIdRef.current === textBoxEdit.itemId) {
+        finishingTextBoxIdRef.current = null;
+      }
+    });
+
+    if (activeSlideIdRef.current !== textBoxEdit.slideId) return;
+    if (!textBoxEdit.draft.trim()) {
+      setPendingTextBox((current) =>
+        current?.box.id === textBoxEdit.itemId ? null : current,
+      );
+      setSelectedItemId((current) =>
+        current === textBoxEdit.itemId ? null : current,
+      );
+      if (!textBoxEdit.isNew) {
+        commit((items) =>
+          items.filter((item) => item.id !== textBoxEdit.itemId),
+        );
+      }
+      return;
+    }
+
+    if (textBoxEdit.isNew) {
+      const pending =
+        pendingTextBox?.box.id === textBoxEdit.itemId
+          ? pendingTextBox.box
+          : null;
+      if (!pending) return;
+
+      setPendingTextBox(null);
+      commit((items) => [
+        ...items,
+        textBoxWithHeight(
+          { ...pending, text: textBoxEdit.draft },
+          textBoxEdit.height,
+        ),
+      ]);
+      return;
+    }
+
+    commit((items) => {
+      const box = items.find((item) => item.id === textBoxEdit.itemId);
+      if (!box || box.kind !== 'text-box') return items;
+      const nextBox = textBoxWithHeight(
+        { ...box, text: textBoxEdit.draft },
+        textBoxEdit.height,
+      );
+      if (
+        box.text === nextBox.text &&
+        box.height === nextBox.height &&
+        box.x === nextBox.x &&
+        box.y === nextBox.y
+      ) {
+        return items;
+      }
+
+      return items.map((item) =>
+        item.id === box.id ? nextBox : item,
+      );
+    });
+  }, [commit, pendingTextBox, textBoxEdit]);
+
+  const beginTextBoxEdit = useCallback(
+    (box: CanvasTextBox) => {
+      const currentEdit =
+        textBoxEdit?.itemId === box.id ? textBoxEdit : null;
+      const draft = currentEdit?.draft ?? box.text;
+      const height = currentEdit?.height ?? box.height;
+      finishStickyNoteEdit();
+      finishTextBoxEdit();
+      cancelActiveGesture();
+      setSelectedItemId(box.id);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setTextBoxEdit({
+        itemId: box.id,
+        slideId: deck.activeSlideId,
+        draft,
+        height,
+        isNew: false,
+      });
+    },
+    [
+      cancelActiveGesture,
+      deck.activeSlideId,
+      finishStickyNoteEdit,
+      finishTextBoxEdit,
+      textBoxEdit,
+    ],
+  );
+
+  const placeTextBox = useCallback(
+    (clientX: number, clientY: number) => {
+      if (!boardRef.current) return;
+      finishStickyNoteEdit();
+      finishTextBoxEdit();
+      cancelActiveGesture();
+      const boardBounds = boardRef.current.getBoundingClientRect();
+      const point = boardPoint(clientX, clientY, {
+        left: boardBounds.left,
+        top: boardBounds.top,
+        width: boardBounds.width,
+        height: boardBounds.height,
+      });
+      const id = crypto.randomUUID();
+      const box = {
+        kind: 'text-box',
+        id,
+        text: '',
+        style: 'normal',
+        color: 'charcoal',
+        alignment: 'left',
+        scale: 1,
+        x: clamp(
+          point.x + TEXT_BOX_DEFAULT_WIDTH / 2,
+          TEXT_BOX_DEFAULT_WIDTH / 2,
+          BOARD_WIDTH - TEXT_BOX_DEFAULT_WIDTH / 2,
+        ),
+        y: clamp(
+          point.y + TEXT_BOX_MIN_HEIGHT / 2,
+          TEXT_BOX_MIN_HEIGHT / 2,
+          BOARD_HEIGHT - TEXT_BOX_MIN_HEIGHT / 2,
+        ),
+        width: TEXT_BOX_DEFAULT_WIDTH,
+        height: TEXT_BOX_MIN_HEIGHT,
+        rotation: 0,
+      } satisfies CanvasTextBox;
+
+      setPendingTextBox({ box, slideId: deck.activeSlideId });
+      setSelectedToolId('select');
+      setSelectedItemId(id);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setTextBoxEdit({
+        itemId: id,
+        slideId: deck.activeSlideId,
+        draft: '',
+        height: box.height,
+        isNew: true,
+      });
+    },
+    [
+      cancelActiveGesture,
+      deck.activeSlideId,
+      finishStickyNoteEdit,
+      finishTextBoxEdit,
+    ],
+  );
+
+  const syncTextBoxHeight = useCallback(
+    (itemId: string, height: number) => {
+      if (textBoxEdit?.itemId === itemId) {
+        setTextBoxEdit((current) =>
+          current?.itemId === itemId && Math.abs(current.height - height) >= 0.1
+            ? { ...current, height }
+            : current,
+        );
+        return;
+      }
+
+      if (pendingTextBox?.box.id === itemId) {
+        setPendingTextBox((current) => {
+          if (current?.box.id !== itemId) return current;
+          const box = textBoxWithHeight(current.box, height);
+          return box === current.box ? current : { ...current, box };
+        });
+        return;
+      }
+
+      setDeck((current) => {
+        let changed = false;
+        const slides = current.slides.map((slide) => {
+          if (slide.id !== current.activeSlideId) return slide;
+          const present = slide.history.present.map((item) => {
+            if (item.id !== itemId || item.kind !== 'text-box') return item;
+            const nextItem = textBoxWithHeight(item, height);
+            if (nextItem !== item) changed = true;
+            return nextItem;
+          });
+          return changed
+            ? { ...slide, history: { ...slide.history, present } }
+            : slide;
+        });
+        return changed ? { ...current, slides } : current;
+      });
+    },
+    [pendingTextBox, setDeck, textBoxEdit],
+  );
+
+  const updateTextBox = useCallback(
+    (itemId: string, update: (box: CanvasTextBox) => CanvasTextBox) => {
+      if (pendingTextBox?.box.id === itemId) {
+        setPendingTextBox((current) =>
+          current?.box.id === itemId
+            ? { ...current, box: update(current.box) }
+            : current,
+        );
+        return;
+      }
+
+      commit((items) => {
+        const box = items.find(
+          (item): item is CanvasTextBox =>
+            item.id === itemId && item.kind === 'text-box',
+        );
+        if (!box) return items;
+        const nextBox = update(box);
+        if (nextBox === box) return items;
+        return items.map((item) => (item.id === itemId ? nextBox : item));
+      });
+    },
+    [commit, pendingTextBox],
+  );
+
+  const changeTextBoxStyle = useCallback(
+    (itemId: string, style: TextBoxStyle) => {
+      updateTextBox(itemId, (box) =>
+        box.style === style && box.scale === 1
+          ? box
+          : { ...box, style, scale: 1 },
+      );
+    },
+    [updateTextBox],
+  );
+
+  const changeTextBoxColor = useCallback(
+    (itemId: string, color: TextBoxColor) => {
+      updateTextBox(itemId, (box) =>
+        box.color === color ? box : { ...box, color },
+      );
+    },
+    [updateTextBox],
+  );
+
+  const changeTextBoxAlignment = useCallback(
+    (itemId: string, alignment: TextBoxAlignment) => {
+      updateTextBox(itemId, (box) =>
+        box.alignment === alignment ? box : { ...box, alignment },
+      );
+    },
+    [updateTextBox],
+  );
+
   const changeStickyNoteColor = useCallback(
     (itemId: string, color: StickyNoteColor) => {
       if (pendingStickyNote?.note.id === itemId) {
@@ -1313,6 +1704,7 @@ export default function BoardApp() {
     (shape: ShapeType) => {
       cancelActiveMarking();
       finishStickyNoteEdit();
+      finishTextBoxEdit();
       cancelActiveGesture();
       closeDrawingMenu();
       setActiveShape(shape);
@@ -1328,6 +1720,7 @@ export default function BoardApp() {
       closeDrawingMenu,
       closeShapeMenu,
       finishStickyNoteEdit,
+      finishTextBoxEdit,
     ],
   );
 
@@ -1335,6 +1728,7 @@ export default function BoardApp() {
     (tool: Tool, toggleDrawingOptions = true) => {
       cancelActiveMarking();
       finishStickyNoteEdit();
+      finishTextBoxEdit();
       setOpenItemMenuId(null);
       setOpenColorPickerId(null);
 
@@ -1368,6 +1762,11 @@ export default function BoardApp() {
         return;
       }
 
+      if (tool.id === 'text-box') {
+        cancelActiveGesture();
+        setSelectedItemId(null);
+      }
+
       closeDrawingMenu();
       closeShapeMenu();
       setSelectedToolId(tool.id);
@@ -1378,6 +1777,7 @@ export default function BoardApp() {
       closeDrawingMenu,
       closeShapeMenu,
       finishStickyNoteEdit,
+      finishTextBoxEdit,
       selectedToolId,
     ],
   );
@@ -1555,8 +1955,20 @@ export default function BoardApp() {
       copyEventHandledRef.current = true;
       setNotice(
         wroteCustomData || wroteText
-          ? `${item.kind === 'shape' ? 'Shape' : 'Object'} copied.`
-          : `${item.kind === 'shape' ? 'Shape' : 'Object'} copied in this board.`,
+          ? `${
+              item.kind === 'shape'
+                ? 'Shape'
+                : item.kind === 'text-box'
+                  ? 'Text box'
+                  : 'Object'
+            } copied.`
+          : `${
+              item.kind === 'shape'
+                ? 'Shape'
+                : item.kind === 'text-box'
+                  ? 'Text box'
+                  : 'Object'
+            } copied in this board.`,
       );
     };
 
@@ -1571,7 +1983,13 @@ export default function BoardApp() {
             event.preventDefault();
             addCopiedItem(
               item,
-              `${item.kind === 'shape' ? 'Shape' : 'Object'} pasted.`,
+              `${
+                item.kind === 'shape'
+                  ? 'Shape'
+                  : item.kind === 'text-box'
+                    ? 'Text box'
+                    : 'Object'
+              } pasted.`,
             );
             return;
           }
@@ -1597,7 +2015,13 @@ export default function BoardApp() {
         event.preventDefault();
         addCopiedItem(
           copiedItemRef.current,
-          `${copiedItemRef.current.kind === 'shape' ? 'Shape' : 'Object'} pasted.`,
+          `${
+            copiedItemRef.current.kind === 'shape'
+              ? 'Shape'
+              : copiedItemRef.current.kind === 'text-box'
+                ? 'Text box'
+                : 'Object'
+          } pasted.`,
         );
         return;
       }
@@ -1917,7 +2341,7 @@ export default function BoardApp() {
     event: ReactPointerEvent<HTMLElement>,
     item: TransformableCanvasItem,
     kind: Gesture['kind'],
-    corner?: ResizeCorner,
+    handle?: ResizeCorner | ResizeSide,
   ) => {
     if (event.button !== 0 || !boardRef.current) return;
 
@@ -1926,8 +2350,14 @@ export default function BoardApp() {
     const itemAtStart =
       item.kind === 'sticky-note' && stickyNoteEdit?.itemId === item.id
         ? { ...item, text: stickyNoteEdit.draft }
-        : item;
+        : item.kind === 'text-box' && textBoxEdit?.itemId === item.id
+          ? textBoxWithHeight(
+              { ...item, text: textBoxEdit.draft },
+              textBoxEdit.height,
+            )
+          : item;
     finishStickyNoteEdit();
+    finishTextBoxEdit();
     const rect = boardRef.current.getBoundingClientRect();
     const compactRect: BoardRect = {
       left: rect.left,
@@ -1941,7 +2371,9 @@ export default function BoardApp() {
     );
     const lastItemIndex = history.present.length - 1;
     const broughtToFront =
-      initialIndex >= 0 && initialIndex !== lastItemIndex;
+      itemAtStart.kind !== 'text-box' &&
+      initialIndex >= 0 &&
+      initialIndex !== lastItemIndex;
 
     gestureRef.current = {
       kind,
@@ -1958,7 +2390,8 @@ export default function BoardApp() {
           ? Math.atan2(startPoint.y - itemAtStart.y, startPoint.x - itemAtStart.x) *
             (180 / Math.PI)
           : undefined,
-      corner,
+      corner: kind === 'resize' ? (handle as ResizeCorner) : undefined,
+      side: kind === 'resize-width' ? (handle as ResizeSide) : undefined,
       moved: false,
     };
     if (broughtToFront) {
@@ -2015,13 +2448,33 @@ export default function BoardApp() {
         ),
       };
     } else if (gesture.kind === 'resize' && gesture.corner) {
-      nextItem = resizedItem(
-        item,
-        gesture.corner,
-        point,
-        item.kind !== 'shape' || item.shape === 'square' || event.shiftKey,
-        item.kind === 'shape' ? MIN_SHAPE_DRAW_SIZE : undefined,
-      );
+      if (item.kind === 'text-box') {
+        const resized = resizedItem(
+          item,
+          gesture.corner,
+          point,
+          true,
+          16,
+        );
+        nextItem = {
+          ...resized,
+          scale: item.scale * (resized.width / item.width),
+        };
+      } else {
+        nextItem = resizedItem(
+          item,
+          gesture.corner,
+          point,
+          item.kind !== 'shape' || item.shape === 'square' || event.shiftKey,
+          item.kind === 'shape' ? MIN_SHAPE_DRAW_SIZE : undefined,
+        );
+      }
+    } else if (
+      gesture.kind === 'resize-width' &&
+      gesture.side &&
+      item.kind === 'text-box'
+    ) {
+      nextItem = resizedItemWidth(item, gesture.side, point, TEXT_BOX_MIN_WIDTH);
     } else if (gesture.kind === 'rotate' && gesture.startAngle !== undefined) {
       const pointerAngle =
         Math.atan2(point.y - item.y, point.x - item.x) * (180 / Math.PI);
@@ -2187,6 +2640,7 @@ export default function BoardApp() {
     event.preventDefault();
     event.stopPropagation();
     finishStickyNoteEdit();
+    finishTextBoxEdit();
     cancelActiveGesture();
     closeDrawingMenu();
     closeShapeMenu();
@@ -2371,6 +2825,7 @@ export default function BoardApp() {
     event.preventDefault();
     event.stopPropagation();
     finishStickyNoteEdit();
+    finishTextBoxEdit();
     cancelActiveGesture();
     closeDrawingMenu();
     closeShapeMenu();
@@ -2523,6 +2978,7 @@ export default function BoardApp() {
     event.preventDefault();
     event.stopPropagation();
     finishStickyNoteEdit();
+    finishTextBoxEdit();
     cancelActiveGesture();
     closeDrawingMenu();
     closeShapeMenu();
@@ -2677,12 +3133,16 @@ export default function BoardApp() {
     cancelActiveMarking();
     closeDrawingMenu();
     closeShapeMenu();
+    finishStickyNoteEdit();
+    finishTextBoxEdit();
     cancelActiveGesture();
     setSelectedItemId(null);
     setOpenItemMenuId(null);
     setOpenColorPickerId(null);
     setStickyNoteEdit(null);
     setPendingStickyNote(null);
+    setTextBoxEdit(null);
+    setPendingTextBox(null);
     closeSlideMenu();
   }, [
     cancelActiveGesture,
@@ -2690,6 +3150,8 @@ export default function BoardApp() {
     closeDrawingMenu,
     closeShapeMenu,
     closeSlideMenu,
+    finishStickyNoteEdit,
+    finishTextBoxEdit,
   ]);
 
   const selectSlide = useCallback(
@@ -2842,12 +3304,28 @@ export default function BoardApp() {
     pendingStickyNote?.slideId === deck.activeSlideId
       ? [...visibleHistoryItems, pendingStickyNote.note]
       : visibleHistoryItems;
-  const items =
-    pendingShape?.slideId === deck.activeSlideId
-      ? [...itemsWithStickyNote, pendingShape.shape]
+  const itemsWithTextBox =
+    pendingTextBox?.slideId === deck.activeSlideId
+      ? [...itemsWithStickyNote, pendingTextBox.box]
       : itemsWithStickyNote;
+  const itemsBeforeTextDraft =
+    pendingShape?.slideId === deck.activeSlideId
+      ? [...itemsWithTextBox, pendingShape.shape]
+      : itemsWithTextBox;
+  const items = itemsBeforeTextDraft.map((item) =>
+    item.kind === 'text-box' && textBoxEdit?.itemId === item.id
+      ? textBoxWithHeight(
+          { ...item, text: textBoxEdit.draft },
+          textBoxEdit.height,
+        )
+      : item,
+  );
   const inkRuns = getInkRuns(items);
   const canvasObjects = items.filter((item) => item.kind !== 'stroke');
+  const selectedTextBox = canvasObjects.find(
+    (item): item is CanvasTextBox =>
+      item.id === selectedItemId && item.kind === 'text-box',
+  );
   const itemLayer = new Map(
     items.map((item, index) => [item.id, index + 1] as const),
   );
@@ -3089,18 +3567,142 @@ export default function BoardApp() {
           </button>
         </div>
         <span className="command-divider" aria-hidden="true" />
-        <div className="zoom-control" aria-hidden="true">
-          <ZoomIn />
-          <ChevronDown />
-        </div>
-        <span className="command-divider" aria-hidden="true" />
-        <span className="command-label background-label" aria-hidden="true">
-          Set background
-        </span>
-        <span className="command-divider" aria-hidden="true" />
-        <span className="command-label clear-label" aria-hidden="true">
-          Clear frame
-        </span>
+        {selectedTextBox ? (
+          <div
+            className="text-format-toolbar"
+            role="toolbar"
+            aria-label="Text formatting"
+            data-text-format-toolbar
+            onBlur={(event) => {
+              if (
+                event.relatedTarget instanceof Node &&
+                event.currentTarget.contains(event.relatedTarget)
+              ) {
+                return;
+              }
+              if (textBoxEdit?.itemId === selectedTextBox.id) {
+                finishTextBoxEdit();
+              }
+            }}
+          >
+            <label className="text-style-control">
+              <span className="sr-only">Text style</span>
+              <select
+                aria-label="Text style"
+                value={selectedTextBox.style}
+                onChange={(event) =>
+                  changeTextBoxStyle(
+                    selectedTextBox.id,
+                    event.currentTarget.value as TextBoxStyle,
+                  )
+                }
+              >
+                {textBoxStyles.map((style) => (
+                  <option key={style.id} value={style.id}>
+                    {style.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </label>
+
+            <span className="text-format-divider" aria-hidden="true" />
+            <div
+              className="text-color-options"
+              role="radiogroup"
+              aria-label="Text color"
+            >
+              {textBoxColors.map((color) => (
+                <button
+                  key={color.id}
+                  type="button"
+                  className="text-color-choice"
+                  role="radio"
+                  aria-label={color.label}
+                  aria-checked={selectedTextBox.color === color.id}
+                  tabIndex={selectedTextBox.color === color.id ? 0 : -1}
+                  title={color.label}
+                  style={
+                    { '--text-swatch-color': color.value } as CSSProperties
+                  }
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() =>
+                    changeTextBoxColor(selectedTextBox.id, color.id)
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      changeTextBoxColor(selectedTextBox.id, color.id);
+                      return;
+                    }
+                    moveColorChoiceFocus(event)?.click();
+                  }}
+                >
+                  <span aria-hidden="true" />
+                </button>
+              ))}
+            </div>
+
+            <span className="text-format-divider" aria-hidden="true" />
+            <div
+              className="text-alignment-options"
+              role="radiogroup"
+              aria-label="Text alignment"
+            >
+              {(
+                [
+                  ['left', 'Left align', AlignLeft],
+                  ['center', 'Center align', AlignCenter],
+                  ['right', 'Right align', AlignRight],
+                ] as const
+              ).map(([alignment, label, Icon]) => (
+                <button
+                  key={alignment}
+                  type="button"
+                  role="radio"
+                  aria-label={label}
+                  aria-checked={selectedTextBox.alignment === alignment}
+                  tabIndex={
+                    selectedTextBox.alignment === alignment ? 0 : -1
+                  }
+                  title={label}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() =>
+                    changeTextBoxAlignment(selectedTextBox.id, alignment)
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      changeTextBoxAlignment(selectedTextBox.id, alignment);
+                      return;
+                    }
+                    moveColorChoiceFocus(event)?.click();
+                  }}
+                >
+                  <Icon aria-hidden="true" />
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="zoom-control" aria-hidden="true">
+              <ZoomIn />
+              <ChevronDown />
+            </div>
+            <span className="command-divider" aria-hidden="true" />
+            <span
+              className="command-label background-label"
+              aria-hidden="true"
+            >
+              Set background
+            </span>
+            <span className="command-divider" aria-hidden="true" />
+            <span className="command-label clear-label" aria-hidden="true">
+              Clear frame
+            </span>
+          </>
+        )}
       </div>
 
       <section
@@ -3114,7 +3716,9 @@ export default function BoardApp() {
             selectedToolId === 'sticky-note' ? ' is-placing-sticky-note' : ''
           }${selectedToolId === 'pen' ? ' is-drawing' : ''}${
             selectedToolId === 'eraser' ? ' is-erasing' : ''
-          }${selectedToolId === 'shape' ? ' is-placing-shape' : ''}`}
+          }${selectedToolId === 'shape' ? ' is-placing-shape' : ''}${
+            selectedToolId === 'text-box' ? ' is-placing-text-box' : ''
+          }`}
           role="region"
           tabIndex={0}
           aria-label={
@@ -3122,7 +3726,9 @@ export default function BoardApp() {
               ? 'Board. Ink eraser active. Drag over ink to erase; objects are unaffected.'
               : selectedToolId === 'shape'
                 ? `Board. ${getShapeOption(activeShape).label} tool active. Drag to create a shape.`
-                : 'Board. Draw, add sticky notes, or paste images.'
+                : selectedToolId === 'text-box'
+                  ? 'Board. Text box tool active. Click anywhere to place text.'
+                : 'Board. Draw, add sticky notes or text, or paste images.'
           }
           onPointerDown={(event) => {
             if (event.currentTarget !== event.target) return;
@@ -3131,6 +3737,13 @@ export default function BoardApp() {
               placeStickyNote(event.clientX, event.clientY);
               return;
             }
+            if (selectedToolId === 'text-box') {
+              event.preventDefault();
+              placeTextBox(event.clientX, event.clientY);
+              return;
+            }
+            finishStickyNoteEdit();
+            finishTextBoxEdit();
             setSelectedItemId(null);
             setOpenItemMenuId(null);
             setOpenColorPickerId(null);
@@ -3142,8 +3755,10 @@ export default function BoardApp() {
           {canvasObjects.map((item) => {
             const isPendingStickyNote =
               pendingStickyNote?.note.id === item.id;
+            const isPendingTextBox = pendingTextBox?.box.id === item.id;
             const isCreatingShape = pendingShape?.shape.id === item.id;
-            const isPending = isPendingStickyNote || isCreatingShape;
+            const isPending =
+              isPendingStickyNote || isPendingTextBox || isCreatingShape;
             const isDiscarding =
               isPendingStickyNote && pendingStickyNote?.discarding === true;
             const isSelected = selectedItemId === item.id;
@@ -3159,7 +3774,9 @@ export default function BoardApp() {
                 ? 'image'
                 : item.kind === 'sticky-note'
                   ? 'sticky note'
-                  : 'shape';
+                  : item.kind === 'text-box'
+                    ? 'text box'
+                    : 'shape';
             const itemExtents = rotatedItemExtents(item);
             const colorPickerPosition = [
               item.x - itemExtents.horizontal < BOARD_WIDTH * 0.35
@@ -3205,13 +3822,30 @@ export default function BoardApp() {
                     ? (item.arrowDirection ?? 'right')
                     : undefined
                 }
+                data-text-style={
+                  item.kind === 'text-box' ? item.style : undefined
+                }
+                data-text-color={
+                  item.kind === 'text-box' ? item.color : undefined
+                }
+                data-text-alignment={
+                  item.kind === 'text-box' ? item.alignment : undefined
+                }
+                data-text-scale={
+                  item.kind === 'text-box' ? item.scale : undefined
+                }
               >
                 <div
                   ref={(element) => {
                     if (element) itemFrameRefsRef.current.set(item.id, element);
                     else itemFrameRefsRef.current.delete(item.id);
                   }}
-                  className={`canvas-item-frame${isSelected ? ' is-selected' : ''}`}
+                  className={`canvas-item-frame${isSelected ? ' is-selected' : ''}${
+                    item.kind === 'text-box' &&
+                    textBoxEdit?.itemId === item.id
+                      ? ' is-text-editing'
+                      : ''
+                  }`}
                   style={frameStyle}
                   role="group"
                   tabIndex={0}
@@ -3221,13 +3855,21 @@ export default function BoardApp() {
                       ? item.name
                       : item.kind === 'sticky-note'
                         ? `Sticky note: ${item.text.trim() || 'Blank'}`
-                        : `${getShapeOption(item.shape).label} shape`
+                        : item.kind === 'text-box'
+                          ? `Text box: ${item.text.trim() || 'Blank'}`
+                          : `${getShapeOption(item.shape).label} shape`
                   }
                   onDoubleClick={(event) => {
-                    if (item.kind !== 'sticky-note') return;
+                    if (
+                      item.kind !== 'sticky-note' &&
+                      item.kind !== 'text-box'
+                    ) {
+                      return;
+                    }
                     event.preventDefault();
                     event.stopPropagation();
-                    beginStickyNoteEdit(item);
+                    if (item.kind === 'sticky-note') beginStickyNoteEdit(item);
+                    else beginTextBoxEdit(item);
                   }}
                   onFocus={(event) => {
                     if (event.currentTarget !== event.target) return;
@@ -3239,13 +3881,15 @@ export default function BoardApp() {
                     if (
                       event.currentTarget !== event.target ||
                       isPending ||
-                      item.kind !== 'sticky-note' ||
+                      (item.kind !== 'sticky-note' &&
+                        item.kind !== 'text-box') ||
                       (event.key !== 'Enter' && event.key !== 'F2')
                     ) {
                       return;
                     }
                     event.preventDefault();
-                    beginStickyNoteEdit(item);
+                    if (item.kind === 'sticky-note') beginStickyNoteEdit(item);
+                    else beginTextBoxEdit(item);
                   }}
                   onPointerDown={(event) => {
                     if (isPending) {
@@ -3279,6 +3923,26 @@ export default function BoardApp() {
                         )
                       }
                       onFinishEditing={finishStickyNoteEdit}
+                    />
+                  ) : item.kind === 'text-box' ? (
+                    <TextBoxContent
+                      box={item}
+                      draft={
+                        textBoxEdit?.itemId === item.id
+                          ? textBoxEdit.draft
+                          : undefined
+                      }
+                      onDraftChange={(draft) =>
+                        setTextBoxEdit((current) =>
+                          current?.itemId === item.id
+                            ? { ...current, draft }
+                            : current,
+                        )
+                      }
+                      onFinishEditing={finishTextBoxEdit}
+                      onHeightChange={(height) =>
+                        syncTextBoxHeight(item.id, height)
+                      }
                     />
                   ) : (
                     <ShapeContent
@@ -3319,12 +3983,49 @@ export default function BoardApp() {
                               type="button"
                               className={`resize-handle resize-${corner}`}
                               aria-label={`Resize ${itemLabel} from ${corner.toUpperCase()} corner`}
-                              title="Drag to resize"
+                              title={
+                                item.kind === 'text-box'
+                                  ? 'Drag to scale the text'
+                                  : 'Drag to resize'
+                              }
                               onPointerDown={(event) =>
                                 startGesture(event, item, 'resize', corner)
                               }
                             />
                           ))}
+
+                          {item.kind === 'text-box' ? (
+                            <>
+                              <button
+                                type="button"
+                                className="resize-side-handle resize-w"
+                                aria-label="Resize text box from left side"
+                                title="Drag to change width and reflow text"
+                                onPointerDown={(event) =>
+                                  startGesture(
+                                    event,
+                                    item,
+                                    'resize-width',
+                                    'w',
+                                  )
+                                }
+                              />
+                              <button
+                                type="button"
+                                className="resize-side-handle resize-e"
+                                aria-label="Resize text box from right side"
+                                title="Drag to change width and reflow text"
+                                onPointerDown={(event) =>
+                                  startGesture(
+                                    event,
+                                    item,
+                                    'resize-width',
+                                    'e',
+                                  )
+                                }
+                              />
+                            </>
+                          ) : null}
                         </>
                       ) : null}
 
@@ -3632,6 +4333,30 @@ export default function BoardApp() {
                               <Copy aria-hidden="true" />
                               Copy {itemLabel}
                             </button>
+                            {item.kind === 'text-box' ? (
+                              <>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  tabIndex={-1}
+                                  disabled={itemLayer.get(item.id) === items.length}
+                                  onClick={() => moveItemLayer(item.id, 1)}
+                                >
+                                  <BringToFront aria-hidden="true" />
+                                  Bring forward
+                                </button>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  tabIndex={-1}
+                                  disabled={itemLayer.get(item.id) === 1}
+                                  onClick={() => moveItemLayer(item.id, -1)}
+                                >
+                                  <SendToBack aria-hidden="true" />
+                                  Send backward
+                                </button>
+                              </>
+                            ) : null}
                             {item.kind === 'shape' ? (
                               <button
                                 type="button"
@@ -3721,47 +4446,65 @@ export default function BoardApp() {
 
           {selectedToolId === 'pen' ||
           selectedToolId === 'eraser' ||
-          selectedToolId === 'shape' ? (
+          selectedToolId === 'shape' ||
+          selectedToolId === 'text-box' ? (
             <div
               ref={drawingSurfaceRef}
               className={`drawing-surface${
                 selectedToolId === 'eraser' ? ' is-erasing' : ''
-              }${selectedToolId === 'shape' ? ' is-shaping' : ''}`}
+              }${selectedToolId === 'shape' ? ' is-shaping' : ''}${
+                selectedToolId === 'text-box' ? ' is-placing-text' : ''
+              }`}
               aria-hidden="true"
               onPointerDown={
                 selectedToolId === 'pen'
                   ? startInkStroke
                   : selectedToolId === 'eraser'
                     ? startEraserStroke
-                    : startShapeCreation
+                    : selectedToolId === 'shape'
+                      ? startShapeCreation
+                      : (event) => {
+                          if (event.button !== 0 || !event.isPrimary) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          placeTextBox(event.clientX, event.clientY);
+                        }
               }
               onPointerMove={
                 selectedToolId === 'pen'
                   ? moveInkStroke
                   : selectedToolId === 'eraser'
                     ? moveEraserStroke
-                    : updateShapeCreation
+                    : selectedToolId === 'shape'
+                      ? updateShapeCreation
+                      : undefined
               }
               onPointerUp={
                 selectedToolId === 'pen'
                   ? finishInkStroke
                   : selectedToolId === 'eraser'
                     ? finishEraserStroke
-                    : finishShapeCreation
+                    : selectedToolId === 'shape'
+                      ? finishShapeCreation
+                      : undefined
               }
               onPointerCancel={
                 selectedToolId === 'pen'
                   ? cancelInkStroke
                   : selectedToolId === 'eraser'
                     ? cancelEraserStroke
-                    : cancelShapeCreation
+                    : selectedToolId === 'shape'
+                      ? cancelShapeCreation
+                      : undefined
               }
               onLostPointerCapture={
                 selectedToolId === 'pen'
                   ? cancelInkStroke
                   : selectedToolId === 'eraser'
                     ? cancelEraserStroke
-                    : cancelShapeCreation
+                    : selectedToolId === 'shape'
+                      ? cancelShapeCreation
+                      : undefined
               }
               onPointerEnter={
                 selectedToolId === 'eraser' ? showEraserPreview : undefined

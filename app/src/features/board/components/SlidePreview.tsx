@@ -5,6 +5,7 @@ import { getInkRuns } from '../utils';
 import { InkStrokePath } from './InkStroke';
 import { ShapeContent } from './ShapeContent';
 import { StickyNoteContent } from './StickyNoteContent';
+import { TextBoxContent } from './TextBoxContent';
 
 type SlidePreviewProps = {
   items: CanvasItem[];
@@ -36,6 +37,8 @@ export function SlidePreview({ items }: SlidePreviewProps) {
               <img src={activeImageSource(item)} alt="" draggable={false} />
             ) : item.kind === 'sticky-note' ? (
               <StickyNoteContent note={item} />
+            ) : item.kind === 'text-box' ? (
+              <TextBoxContent box={item} />
             ) : (
               <ShapeContent
                 arrowDirection={item.arrowDirection}

@@ -77,6 +77,27 @@ export type CanvasShape = CanvasTransform & {
   filled?: boolean;
 };
 
+export type TextBoxStyle = 'display' | 'normal' | 'caption';
+
+export type TextBoxColor =
+  | 'charcoal'
+  | 'blue'
+  | 'green'
+  | 'yellow'
+  | 'red';
+
+export type TextBoxAlignment = 'left' | 'center' | 'right';
+
+export type CanvasTextBox = CanvasTransform & {
+  kind: 'text-box';
+  text: string;
+  style: TextBoxStyle;
+  color: TextBoxColor;
+  alignment: TextBoxAlignment;
+  /** Multiplier applied to the selected style preset by corner scaling. */
+  scale: number;
+};
+
 export type DrawingStyle = 'pen' | 'marker' | 'highlighter' | 'brush';
 
 export type DrawingColor =
@@ -117,7 +138,8 @@ export type CanvasStroke = {
 export type TransformableCanvasItem =
   | CanvasImage
   | CanvasStickyNote
-  | CanvasShape;
+  | CanvasShape
+  | CanvasTextBox;
 
 export type CanvasItem = TransformableCanvasItem | CanvasStroke;
 
@@ -152,8 +174,10 @@ export type BoardRect = {
 
 export type ResizeCorner = 'nw' | 'ne' | 'sw' | 'se';
 
+export type ResizeSide = 'w' | 'e';
+
 export type Gesture = {
-  kind: 'move' | 'resize' | 'rotate';
+  kind: 'move' | 'resize' | 'resize-width' | 'rotate';
   pointerId: number;
   slideId: string;
   itemId: string;
@@ -164,5 +188,6 @@ export type Gesture = {
   startPoint: Point;
   startAngle?: number;
   corner?: ResizeCorner;
+  side?: ResizeSide;
   moved: boolean;
 };
