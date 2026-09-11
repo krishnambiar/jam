@@ -5,6 +5,8 @@ export const LASER_TRAIL_FADE_MS = 1200;
 export const LASER_TRAIL_MAX_LENGTH = 920;
 export const LASER_TRAIL_FADE_LENGTH = 170;
 export const LASER_TRAIL_STROKE_WIDTH_PX = 2.5;
+export const LASER_TRAIL_RELEASE_MS = 600;
+export const LASER_TRAIL_RELEASE_FEATHER_LENGTH = 80;
 
 const LASER_TRAIL_TAP_LENGTH = 12;
 const LENGTH_EPSILON = 0.001;
@@ -47,39 +49,29 @@ export function laserTrailLength(points: readonly LaserPoint[]) {
   return laserTrailCumulativeLengths(points).at(-1) ?? 0;
 }
 
-/**
- * On release, age the tail to the fade boundary and graduate timestamps toward
- * the just-released head. The existing per-point fade can then start erasing
- * from the back on the next frame without brightening older active geometry.
- */
-export function stageLaserTrailForRelease(
-  points: readonly LaserPoint[],
-  endedAt: number,
+export function laserTrailReleaseOpacity(
+  distanceFromTail: number,
+  trailLength: number,
+  elapsed: number,
+  duration = LASER_TRAIL_RELEASE_MS,
+  featherLength = LASER_TRAIL_RELEASE_FEATHER_LENGTH,
 ) {
-  const cumulativeLengths = laserTrailCumulativeLengths(points);
-  const geometryLength = cumulativeLengths.at(-1) ?? 0;
-  const fadeStart = LASER_TRAIL_LIFETIME_MS - LASER_TRAIL_FADE_MS;
-  const lastIndex = points.length - 1;
+  if (elapsed < 0) return 1;
+  if (duration <= 0 || elapsed >= duration) return 0;
 
-  return points.map((point, index) => {
-    if (geometryLength <= LENGTH_EPSILON) {
-      return {
-        ...point,
-        createdAt: Math.min(point.createdAt, endedAt - fadeStart),
-      };
-    }
+  const boundedLength = Math.max(0, trailLength);
+  const progress = clampUnit(elapsed / duration);
+  if (boundedLength <= LENGTH_EPSILON) return 1 - progress;
 
-    if (index === lastIndex) {
-      return { ...point, createdAt: endedAt };
-    }
-
-    const progress = (cumulativeLengths[index] ?? 0) / geometryLength;
-    const stagedCreatedAt = endedAt - fadeStart * (1 - progress);
-    return {
-      ...point,
-      createdAt: Math.min(point.createdAt, stagedCreatedAt),
-    };
-  });
+  const boundedFeather = Math.min(
+    boundedLength,
+    Math.max(LENGTH_EPSILON, featherLength),
+    Math.max(8, boundedLength * 0.1),
+  );
+  const eraseFront = progress * boundedLength;
+  return smoothstep(
+    (distanceFromTail - eraseFront) / boundedFeather,
+  );
 }
 
 export function laserTrailBudgetLength(points: readonly LaserPoint[]) {

@@ -5,10 +5,12 @@ import BoardApp from './BoardApp';
 import {
   LASER_TRAIL_LIFETIME_MS,
   LASER_TRAIL_MAX_LENGTH,
+  LASER_TRAIL_RELEASE_MS,
   LASER_TRAIL_STROKE_WIDTH_PX,
   laserTrailBudgetLength,
   laserTrailJuiceOpacity,
   laserTrailOpacity,
+  laserTrailReleaseOpacity,
   trimLaserTrailsToLength,
 } from './laserTrail';
 
@@ -242,9 +244,31 @@ describe('BoardApp laser pointer', () => {
           index === 0 || opacity >= releasedOpacities[index - 1],
       ),
     ).toBe(true);
+
+    runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS / 2);
+    const firstVisibleSegment = document.querySelector<SVGPathElement>(
+      '.laser-trail-mask-segment',
+    );
+    const firstVisibleDistance = Number(
+      firstVisibleSegment
+        ?.getAttribute('stroke-dasharray')
+        ?.split(' ')[1],
+    );
+    expect(firstVisibleDistance).toBeGreaterThan(195);
+    expect(firstVisibleDistance).toBeLessThan(210);
+
+    const halfwayOpacities = Array.from(
+      document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
+    ).map((band) => Number(band.getAttribute('opacity')));
+    expect(halfwayOpacities[0]).toBeLessThan(0.1);
+    expect(halfwayOpacities.at(-1)).toBe(1);
+
+    runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS + 1);
+    expect(document.querySelector('.laser-trail')).toBeNull();
+    expect(animationFrames.size).toBe(0);
   });
 
-  it('evaporates from the oldest end and fully disappears three seconds after release', () => {
+  it('evaporates from the oldest end and quickly disappears after release', () => {
     render(<BoardApp />);
     activateTool('Laser pointer');
     const surface = activeDrawingSurface();
@@ -267,16 +291,16 @@ describe('BoardApp laser pointer', () => {
     expect(remainingPath).toContain('500 300');
 
     drawPointerEvent(surface, 'up', { x: 500, y: 300 });
-    runAnimationFrame(5601);
+    runAnimationFrame(3101 + LASER_TRAIL_RELEASE_MS / 2);
     const fadingBands = Array.from(
       document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
     );
     expect(fadingBands.length).toBeGreaterThan(1);
     expect(
       Math.max(...fadingBands.map((band) => Number(band.getAttribute('opacity')))),
-    ).toBeLessThan(1);
+    ).toBe(1);
 
-    runAnimationFrame(3101 + LASER_TRAIL_LIFETIME_MS + 1);
+    runAnimationFrame(3101 + LASER_TRAIL_RELEASE_MS + 1);
     expect(document.querySelector('.laser-trail')).toBeNull();
     expect(animationFrames.size).toBe(0);
   });
@@ -306,16 +330,16 @@ describe('BoardApp laser pointer', () => {
     drawPointerEvent(surface, 'move', { x: 280, y: 180 }, 4);
     drawPointerEvent(surface, 'up', { x: 360, y: 220 }, 4);
 
-    setClock(1000);
+    setClock(LASER_TRAIL_RELEASE_MS / 2);
     drawPointerEvent(surface, 'down', { x: 500, y: 300 }, 5);
     drawPointerEvent(surface, 'move', { x: 680, y: 420 }, 5);
     drawPointerEvent(surface, 'up', { x: 760, y: 480 }, 5);
     expect(document.querySelectorAll('.laser-trail')).toHaveLength(2);
 
-    runAnimationFrame(LASER_TRAIL_LIFETIME_MS + 1);
+    runAnimationFrame(LASER_TRAIL_RELEASE_MS + 1);
     expect(document.querySelectorAll('.laser-trail')).toHaveLength(1);
 
-    runAnimationFrame(LASER_TRAIL_LIFETIME_MS + 1001);
+    runAnimationFrame(LASER_TRAIL_RELEASE_MS * 1.5 + 1);
     expect(document.querySelector('.laser-trail')).toBeNull();
   });
 
@@ -430,6 +454,21 @@ describe('laser trail evaporation', () => {
     expect(laserTrailJuiceOpacity(90, 90, 100, 20)).toBe(0);
     expect(laserTrailJuiceOpacity(90, 100, 100, 20)).toBeCloseTo(0.5);
     expect(laserTrailJuiceOpacity(100, 100, 100, 20)).toBe(0);
+  });
+
+  it('uses a fast localized release front instead of fading the whole trail', () => {
+    const halfway = LASER_TRAIL_RELEASE_MS / 2;
+
+    expect(laserTrailReleaseOpacity(0, 400, halfway)).toBe(0);
+    expect(laserTrailReleaseOpacity(199, 400, halfway)).toBe(0);
+    expect(laserTrailReleaseOpacity(200, 400, halfway)).toBe(0);
+    expect(laserTrailReleaseOpacity(220, 400, halfway)).toBeCloseTo(0.5);
+    expect(laserTrailReleaseOpacity(240, 400, halfway)).toBe(1);
+    expect(laserTrailReleaseOpacity(400, 400, halfway)).toBe(1);
+    expect(laserTrailReleaseOpacity(400, 400, LASER_TRAIL_RELEASE_MS)).toBe(0);
+    expect(laserTrailReleaseOpacity(0, 0, halfway)).toBeCloseTo(0.5);
+    expect(laserTrailReleaseOpacity(1, 1, 0)).toBe(1);
+    expect(laserTrailReleaseOpacity(1, 1, halfway)).toBeCloseTo(0.5);
   });
 
   it('interpolates the exact global cutoff regardless of sample density', () => {

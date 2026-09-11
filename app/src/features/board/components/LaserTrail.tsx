@@ -14,12 +14,13 @@ import {
   getDrawingColorValue,
 } from '../constants';
 import {
+  LASER_TRAIL_RELEASE_MS,
   LASER_TRAIL_STROKE_WIDTH_PX,
   laserTrailBudgetLength,
   laserTrailCumulativeLengths,
   laserTrailJuiceOpacity,
   laserTrailOpacity,
-  stageLaserTrailForRelease,
+  laserTrailReleaseOpacity,
   trimLaserTrailsToLength,
 } from '../laserTrail';
 import type { LaserPoint, LaserTrail } from '../types';
@@ -241,9 +242,15 @@ export const LaserTrailLayer = forwardRef<LaserTrailHandle>(
         nowRef.current = now;
         trailsRef.current = trimLaserTrailsToLength(
           trailsRef.current.flatMap((trail) => {
+            if (
+              trail.endedAt !== undefined &&
+              now - trail.endedAt >= LASER_TRAIL_RELEASE_MS
+            ) {
+              return [];
+            }
             const points = visibleLaserPoints(
               trail.points,
-              now,
+              trail.endedAt ?? now,
               activeTrailIdsRef.current.has(trail.id),
             );
             return points.length > 0 ? [{ ...trail, points }] : [];
@@ -313,11 +320,21 @@ export const LaserTrailLayer = forwardRef<LaserTrailHandle>(
           );
           if (trailIndex < 0) return;
           const trail = trailsRef.current[trailIndex];
-          if (trail.points.length === 0) return;
+          const lastPoint = trail.points.at(-1);
+          if (!lastPoint) return;
+          const releasedPoints = visibleLaserPoints(
+            [
+              ...trail.points.slice(0, -1),
+              { ...lastPoint, createdAt: endedAt },
+            ],
+            endedAt,
+            false,
+          );
           const trails = [...trailsRef.current];
           trails[trailIndex] = {
             ...trail,
-            points: stageLaserTrailForRelease(trail.points, endedAt),
+            endedAt,
+            points: releasedPoints,
           };
           trailsRef.current = trails;
           nowRef.current = Math.max(nowRef.current, endedAt);
@@ -373,12 +390,23 @@ export const LaserTrailLayer = forwardRef<LaserTrailHandle>(
             ? ((geometryLength - distanceAlongTrail) / geometryLength) *
               budgetLength
             : budgetLength / 2;
-        return (
-          laserTrailOpacity(point.createdAt, nowRef.current) *
+        const baseOpacity =
+          laserTrailOpacity(
+            point.createdAt,
+            trail.endedAt ?? nowRef.current,
+          ) *
           laserTrailJuiceOpacity(
             newerTrailLength + distanceFromTrailTip,
             totalBudgetLength,
-          )
+          );
+        if (trail.endedAt === undefined) return baseOpacity;
+        return Math.min(
+          baseOpacity,
+          laserTrailReleaseOpacity(
+            distanceAlongTrail,
+            geometryLength,
+            nowRef.current - trail.endedAt,
+          ),
         );
       });
       const bands = laserMaskBands(cumulativeLengths, pointOpacities);

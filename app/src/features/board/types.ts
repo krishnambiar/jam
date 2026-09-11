@@ -119,6 +119,7 @@ export type LaserPoint = Point & {
 export type LaserTrail = {
   id: string;
   points: LaserPoint[];
+  endedAt?: number;
 };
 
 export type EraserPoint = Point & {
