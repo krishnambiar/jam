@@ -38,6 +38,10 @@ import {
   InkStrokePath,
   type InkStrokeHandle,
 } from './components/InkStroke';
+import {
+  LaserTrailLayer,
+  type LaserTrailHandle,
+} from './components/LaserTrail';
 import { SlidePreview } from './components/SlidePreview';
 import { ShapeContent } from './components/ShapeContent';
 import { ShapeMenu } from './components/ShapeMenu';
@@ -89,6 +93,7 @@ import type {
   EraserTrace,
   Gesture,
   HistoryState,
+  LaserPoint,
   Point,
   ResizeCorner,
   ResizeSide,
@@ -155,6 +160,12 @@ type InkGesture = {
   stroke: CanvasStroke;
   lastSample: Point & { time: number };
   velocity: number | null;
+};
+
+type LaserGesture = {
+  pointerId: number;
+  boardRect: BoardRect;
+  trailId: string;
 };
 
 type EraserGesture = {
@@ -515,6 +526,7 @@ export default function BoardApp() {
   const shapeToolButtonRef = useRef<HTMLButtonElement>(null);
   const drawingSurfaceRef = useRef<HTMLDivElement>(null);
   const activeInkRendererRef = useRef<InkStrokeHandle>(null);
+  const activeLaserRendererRef = useRef<LaserTrailHandle>(null);
   const inkRenderFrameRef = useRef<number | null>(null);
   const activeColorChoiceRef = useRef<HTMLButtonElement>(null);
   const focusColorPickerOnOpenRef = useRef(false);
@@ -531,6 +543,7 @@ export default function BoardApp() {
     new Map(),
   );
   const inkGestureRef = useRef<InkGesture | null>(null);
+  const laserGestureRef = useRef<LaserGesture | null>(null);
   const eraserGestureRef = useRef<EraserGesture | null>(null);
   const shapeGestureRef = useRef<ShapeGesture | null>(null);
   const copiedItemRef = useRef<TransformableCanvasItem | null>(null);
@@ -577,6 +590,19 @@ export default function BoardApp() {
     }
   }, []);
 
+  const cancelActiveLaserPointer = useCallback(() => {
+    const gesture = laserGestureRef.current;
+    laserGestureRef.current = null;
+    activeLaserRendererRef.current?.clear();
+
+    if (
+      gesture &&
+      drawingSurfaceRef.current?.hasPointerCapture(gesture.pointerId)
+    ) {
+      drawingSurfaceRef.current.releasePointerCapture(gesture.pointerId);
+    }
+  }, []);
+
   const cancelActiveEraser = useCallback(() => {
     const gesture = eraserGestureRef.current;
     eraserGestureRef.current = null;
@@ -606,9 +632,15 @@ export default function BoardApp() {
 
   const cancelActiveMarking = useCallback(() => {
     cancelActiveInk();
+    cancelActiveLaserPointer();
     cancelActiveEraser();
     cancelActiveShape();
-  }, [cancelActiveEraser, cancelActiveInk, cancelActiveShape]);
+  }, [
+    cancelActiveEraser,
+    cancelActiveInk,
+    cancelActiveLaserPointer,
+    cancelActiveShape,
+  ]);
 
   const closeSlideMenu = useCallback((restoreFocus = false) => {
     setOpenSlideMenuId(null);
@@ -1732,7 +1764,11 @@ export default function BoardApp() {
       setOpenItemMenuId(null);
       setOpenColorPickerId(null);
 
-      if (tool.id === 'pen' || tool.id === 'eraser') {
+      if (
+        tool.id === 'pen' ||
+        tool.id === 'eraser' ||
+        tool.id === 'laser-pointer'
+      ) {
         cancelActiveGesture();
         setSelectedItemId(null);
         setSelectedToolId(tool.id);
@@ -2067,6 +2103,7 @@ export default function BoardApp() {
       if (event.key === 'Escape') {
         if (
           inkGestureRef.current ||
+          laserGestureRef.current ||
           eraserGestureRef.current ||
           shapeGestureRef.current
         ) {
@@ -2215,6 +2252,22 @@ export default function BoardApp() {
     const timeout = window.setTimeout(() => setNotice(null), 3200);
     return () => window.clearTimeout(timeout);
   }, [notice]);
+
+  useEffect(() => {
+    if (selectedToolId !== 'laser-pointer') return;
+
+    const clearLaserPointer = () => cancelActiveLaserPointer();
+    const clearHiddenLaserPointer = () => {
+      if (document.visibilityState === 'hidden') clearLaserPointer();
+    };
+
+    window.addEventListener('blur', clearLaserPointer);
+    document.addEventListener('visibilitychange', clearHiddenLaserPointer);
+    return () => {
+      window.removeEventListener('blur', clearLaserPointer);
+      document.removeEventListener('visibilitychange', clearHiddenLaserPointer);
+    };
+  }, [cancelActiveLaserPointer, selectedToolId]);
 
   useEffect(() => {
     Array.from(backgroundRemovalJobsRef.current.values()).forEach((job) => {
@@ -2718,6 +2771,115 @@ export default function BoardApp() {
       points: [...gesture.stroke.points],
     };
     commit((currentItems) => [...currentItems, completedStroke]);
+  };
+
+  const appendPointerEventToLaser = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const gesture = laserGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return null;
+
+    const coalescedEvents = event.nativeEvent.getCoalescedEvents?.() ?? [];
+    const samples =
+      coalescedEvents.length > 0 ? coalescedEvents : [event.nativeEvent];
+    const createdAt = performance.now();
+    const points: LaserPoint[] = samples.map((sample) => {
+      const point = boardPoint(
+        sample.clientX,
+        sample.clientY,
+        gesture.boardRect,
+      );
+      return {
+        x: clamp(point.x, 0, BOARD_WIDTH),
+        y: clamp(point.y, 0, BOARD_HEIGHT),
+        createdAt,
+      };
+    });
+    activeLaserRendererRef.current?.appendPoints(gesture.trailId, points);
+    return gesture;
+  };
+
+  const startLaserTrail = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (
+      event.button !== 0 ||
+      !event.isPrimary ||
+      laserGestureRef.current
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    finishStickyNoteEdit();
+    finishTextBoxEdit();
+    cancelActiveGesture();
+    closeDrawingMenu();
+    closeShapeMenu();
+    setSelectedItemId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const boardRect: BoardRect = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const point = boardPoint(event.clientX, event.clientY, boardRect);
+    const trailId = crypto.randomUUID();
+    const firstPoint: LaserPoint = {
+      x: clamp(point.x, 0, BOARD_WIDTH),
+      y: clamp(point.y, 0, BOARD_HEIGHT),
+      createdAt: performance.now(),
+    };
+
+    laserGestureRef.current = {
+      pointerId: event.pointerId,
+      boardRect,
+      trailId,
+    };
+    activeLaserRendererRef.current?.startTrail(trailId, firstPoint);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const moveLaserTrail = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!laserGestureRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    appendPointerEventToLaser(event);
+  };
+
+  const finishLaserTrail = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = appendPointerEventToLaser(event);
+    if (!gesture) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    laserGestureRef.current = null;
+    activeLaserRendererRef.current?.endTrail(
+      gesture.trailId,
+      performance.now(),
+    );
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const cancelLaserTrail = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = laserGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    laserGestureRef.current = null;
+    activeLaserRendererRef.current?.endTrail(
+      gesture.trailId,
+      performance.now(),
+    );
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   };
 
   const applyEraserSweeps = (
@@ -3718,6 +3880,8 @@ export default function BoardApp() {
             selectedToolId === 'sticky-note' ? ' is-placing-sticky-note' : ''
           }${selectedToolId === 'pen' ? ' is-drawing' : ''}${
             selectedToolId === 'eraser' ? ' is-erasing' : ''
+          }${
+            selectedToolId === 'laser-pointer' ? ' is-laser-pointing' : ''
           }${selectedToolId === 'shape' ? ' is-placing-shape' : ''}${
             selectedToolId === 'text-box' ? ' is-placing-text-box' : ''
           }`}
@@ -3726,6 +3890,8 @@ export default function BoardApp() {
           aria-label={
             selectedToolId === 'eraser'
               ? 'Board. Ink eraser active. Drag over ink to erase; objects are unaffected.'
+              : selectedToolId === 'laser-pointer'
+                ? 'Board. Laser pointer active. Drag to draw a temporary red trail.'
               : selectedToolId === 'shape'
                 ? `Board. ${getShapeOption(activeShape).label} tool active. Drag to create a shape.`
                 : selectedToolId === 'text-box'
@@ -4448,12 +4614,17 @@ export default function BoardApp() {
 
           {selectedToolId === 'pen' ||
           selectedToolId === 'eraser' ||
+          selectedToolId === 'laser-pointer' ||
           selectedToolId === 'shape' ||
           selectedToolId === 'text-box' ? (
             <div
               ref={drawingSurfaceRef}
               className={`drawing-surface${
                 selectedToolId === 'eraser' ? ' is-erasing' : ''
+              }${
+                selectedToolId === 'laser-pointer'
+                  ? ' is-laser-pointing'
+                  : ''
               }${selectedToolId === 'shape' ? ' is-shaping' : ''}${
                 selectedToolId === 'text-box' ? ' is-placing-text' : ''
               }`}
@@ -4463,50 +4634,60 @@ export default function BoardApp() {
                   ? startInkStroke
                   : selectedToolId === 'eraser'
                     ? startEraserStroke
-                    : selectedToolId === 'shape'
-                      ? startShapeCreation
-                      : (event) => {
-                          if (event.button !== 0 || !event.isPrimary) return;
-                          event.preventDefault();
-                          event.stopPropagation();
-                          placeTextBox(event.clientX, event.clientY);
-                        }
+                    : selectedToolId === 'laser-pointer'
+                      ? startLaserTrail
+                      : selectedToolId === 'shape'
+                        ? startShapeCreation
+                        : (event) => {
+                            if (event.button !== 0 || !event.isPrimary) return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            placeTextBox(event.clientX, event.clientY);
+                          }
               }
               onPointerMove={
                 selectedToolId === 'pen'
                   ? moveInkStroke
                   : selectedToolId === 'eraser'
                     ? moveEraserStroke
-                    : selectedToolId === 'shape'
-                      ? updateShapeCreation
-                      : undefined
+                    : selectedToolId === 'laser-pointer'
+                      ? moveLaserTrail
+                      : selectedToolId === 'shape'
+                        ? updateShapeCreation
+                        : undefined
               }
               onPointerUp={
                 selectedToolId === 'pen'
                   ? finishInkStroke
                   : selectedToolId === 'eraser'
                     ? finishEraserStroke
-                    : selectedToolId === 'shape'
-                      ? finishShapeCreation
-                      : undefined
+                    : selectedToolId === 'laser-pointer'
+                      ? finishLaserTrail
+                      : selectedToolId === 'shape'
+                        ? finishShapeCreation
+                        : undefined
               }
               onPointerCancel={
                 selectedToolId === 'pen'
                   ? cancelInkStroke
                   : selectedToolId === 'eraser'
                     ? cancelEraserStroke
-                    : selectedToolId === 'shape'
-                      ? cancelShapeCreation
-                      : undefined
+                    : selectedToolId === 'laser-pointer'
+                      ? cancelLaserTrail
+                      : selectedToolId === 'shape'
+                        ? cancelShapeCreation
+                        : undefined
               }
               onLostPointerCapture={
                 selectedToolId === 'pen'
                   ? cancelInkStroke
                   : selectedToolId === 'eraser'
                     ? cancelEraserStroke
-                    : selectedToolId === 'shape'
-                      ? cancelShapeCreation
-                      : undefined
+                    : selectedToolId === 'laser-pointer'
+                      ? cancelLaserTrail
+                      : selectedToolId === 'shape'
+                        ? cancelShapeCreation
+                        : undefined
               }
               onPointerEnter={
                 selectedToolId === 'eraser' ? showEraserPreview : undefined
@@ -4516,6 +4697,11 @@ export default function BoardApp() {
               }}
             >
               <svg
+                className={
+                  selectedToolId === 'laser-pointer'
+                    ? 'laser-trail-layer'
+                    : undefined
+                }
                 viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`}
                 preserveAspectRatio="none"
               >
@@ -4525,6 +4711,9 @@ export default function BoardApp() {
                     live
                     stroke={pendingStroke}
                   />
+                ) : null}
+                {selectedToolId === 'laser-pointer' ? (
+                  <LaserTrailLayer ref={activeLaserRendererRef} />
                 ) : null}
               </svg>
               {selectedToolId === 'eraser' && eraserPreview ? (

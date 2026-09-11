@@ -1,6 +1,6 @@
 import {
-  Brush,
   Circle,
+  Crosshair,
   Eraser,
   MousePointer2,
   Pen,
@@ -39,7 +39,11 @@ export const tools: Tool[] = [
   { id: 'sticky-note', label: 'Sticky note', icon: null },
   { id: 'shape', label: 'Shape', icon: Circle, menu: true },
   { id: 'text-box', label: 'Text box', icon: ScanText },
-  { id: 'laser-pointer', label: 'Laser pointer', icon: Brush },
+  {
+    id: 'laser-pointer',
+    label: 'Laser pointer',
+    icon: Crosshair,
+  },
 ];
 
 export const drawingStyles: ReadonlyArray<{

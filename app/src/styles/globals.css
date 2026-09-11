@@ -816,7 +816,8 @@ select {
 }
 
 .board.is-placing-sticky-note,
-.board.is-placing-shape {
+.board.is-placing-shape,
+.board.is-laser-pointing {
   cursor: crosshair;
 }
 
@@ -869,6 +870,10 @@ select {
   cursor: crosshair;
 }
 
+.drawing-surface.is-laser-pointing {
+  cursor: crosshair;
+}
+
 .drawing-surface.is-placing-text {
   cursor: text;
 }
@@ -888,6 +893,39 @@ select {
 .drawing-surface > svg,
 .ink-path {
   pointer-events: none;
+}
+
+.laser-trail-layer {
+  overflow: hidden;
+}
+
+.laser-trail-run,
+.laser-trail-tip {
+  transition: opacity 60ms linear;
+}
+
+.laser-trail-glow,
+.laser-trail-core {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.laser-trail-glow {
+  stroke-width: 15px;
+  stroke-opacity: 0.22;
+}
+
+.laser-trail-core {
+  stroke-width: 5.5px;
+  stroke-opacity: 0.96;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .laser-trail-run,
+  .laser-trail-tip {
+    transition: none;
+  }
 }
 
 .canvas-item.is-discarding {

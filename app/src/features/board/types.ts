@@ -112,6 +112,15 @@ export type StrokePoint = Point & {
   velocity: number;
 };
 
+export type LaserPoint = Point & {
+  createdAt: number;
+};
+
+export type LaserTrail = {
+  id: string;
+  points: LaserPoint[];
+};
+
 export type EraserPoint = Point & {
   radius: number;
 };
