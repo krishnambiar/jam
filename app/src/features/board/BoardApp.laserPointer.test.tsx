@@ -254,8 +254,8 @@ describe('BoardApp laser pointer', () => {
         ?.getAttribute('stroke-dasharray')
         ?.split(' ')[1],
     );
-    expect(firstVisibleDistance).toBeGreaterThan(195);
-    expect(firstVisibleDistance).toBeLessThan(210);
+    expect(firstVisibleDistance).toBeGreaterThan(210);
+    expect(firstVisibleDistance).toBeLessThan(225);
 
     const halfwayOpacities = Array.from(
       document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
@@ -263,8 +263,40 @@ describe('BoardApp laser pointer', () => {
     expect(halfwayOpacities[0]).toBeLessThan(0.1);
     expect(halfwayOpacities.at(-1)).toBe(1);
 
+    runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS * 0.75);
+    expect(document.querySelector('.laser-trail-stroke')).not.toBeNull();
+
+    runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS * 0.92);
+    expect(document.querySelector('.laser-trail-stroke')).toBeNull();
+    expect(document.querySelector('.laser-trail-mask-band')).toBeNull();
+    expect(document.querySelector('.laser-trail-mask-cap')).toBeNull();
+
     runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS + 1);
     expect(document.querySelector('.laser-trail')).toBeNull();
+    expect(animationFrames.size).toBe(0);
+  });
+
+  it('clears a tap before release cleanup without leaving a dot', () => {
+    render(<BoardApp />);
+    activateTool('Laser pointer');
+    const surface = activeDrawingSurface();
+
+    drawPointerEvent(surface, 'down', { x: 240, y: 180 });
+    setClock(100);
+    drawPointerEvent(surface, 'up', { x: 240, y: 180 });
+
+    runAnimationFrame(116);
+    expect(document.querySelector('.laser-trail-stroke')).not.toBeNull();
+
+    runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS / 2);
+    expect(document.querySelector('.laser-trail-stroke')).not.toBeNull();
+
+    runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS * 0.6);
+    expect(document.querySelector('.laser-trail-stroke')).toBeNull();
+    expect(document.querySelector('.laser-trail-mask-band')).toBeNull();
+    expect(document.querySelector('.laser-trail-mask-cap')).toBeNull();
+
+    runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS + 1);
     expect(animationFrames.size).toBe(0);
   });
 
@@ -460,15 +492,44 @@ describe('laser trail evaporation', () => {
     const halfway = LASER_TRAIL_RELEASE_MS / 2;
 
     expect(laserTrailReleaseOpacity(0, 400, halfway)).toBe(0);
-    expect(laserTrailReleaseOpacity(199, 400, halfway)).toBe(0);
-    expect(laserTrailReleaseOpacity(200, 400, halfway)).toBe(0);
-    expect(laserTrailReleaseOpacity(220, 400, halfway)).toBeCloseTo(0.5);
-    expect(laserTrailReleaseOpacity(240, 400, halfway)).toBe(1);
+    expect(laserTrailReleaseOpacity(219, 400, halfway)).toBe(0);
+    expect(laserTrailReleaseOpacity(220, 400, halfway)).toBe(0);
+    expect(laserTrailReleaseOpacity(240, 400, halfway)).toBeCloseTo(0.5);
+    expect(laserTrailReleaseOpacity(260, 400, halfway)).toBe(1);
     expect(laserTrailReleaseOpacity(400, 400, halfway)).toBe(1);
     expect(laserTrailReleaseOpacity(400, 400, LASER_TRAIL_RELEASE_MS)).toBe(0);
-    expect(laserTrailReleaseOpacity(0, 0, halfway)).toBeCloseTo(0.5);
     expect(laserTrailReleaseOpacity(1, 1, 0)).toBe(1);
-    expect(laserTrailReleaseOpacity(1, 1, halfway)).toBeCloseTo(0.5);
+    expect(laserTrailReleaseOpacity(1, 1, halfway)).toBe(0);
+
+    const tapHalfwayOpacity = laserTrailReleaseOpacity(0, 0, halfway);
+    expect(laserTrailReleaseOpacity(0, 0, 0)).toBe(1);
+    expect(tapHalfwayOpacity).toBeGreaterThan(0);
+    expect(tapHalfwayOpacity).toBeLessThan(1);
+    expect(
+      laserTrailReleaseOpacity(0, 0, LASER_TRAIL_RELEASE_MS * 0.6),
+    ).toBe(0);
+
+    const nearNormalTrailEnd = laserTrailReleaseOpacity(
+      400,
+      400,
+      LASER_TRAIL_RELEASE_MS * 0.9,
+    );
+    expect(nearNormalTrailEnd).toBeGreaterThan(0);
+    expect(nearNormalTrailEnd).toBeLessThan(0.05);
+    expect(
+      laserTrailReleaseOpacity(
+        400,
+        400,
+        LASER_TRAIL_RELEASE_MS * 0.92,
+      ),
+    ).toBe(0);
+    expect(
+      laserTrailReleaseOpacity(
+        LASER_TRAIL_MAX_LENGTH,
+        LASER_TRAIL_MAX_LENGTH,
+        LASER_TRAIL_RELEASE_MS * 0.925,
+      ),
+    ).toBe(0);
   });
 
   it('interpolates the exact global cutoff regardless of sample density', () => {

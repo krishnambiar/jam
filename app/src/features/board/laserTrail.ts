@@ -61,16 +61,20 @@ export function laserTrailReleaseOpacity(
 
   const boundedLength = Math.max(0, trailLength);
   const progress = clampUnit(elapsed / duration);
-  if (boundedLength <= LENGTH_EPSILON) return 1 - progress;
+  const isTap = boundedLength <= LENGTH_EPSILON;
+  // Give a tap virtual length so its single round cap completes the same
+  // tail-to-head exit instead of surviving until lifecycle cleanup.
+  const releaseLength = isTap ? LASER_TRAIL_TAP_LENGTH : boundedLength;
+  const releaseDistance = isTap ? releaseLength : distanceFromTail;
 
   const boundedFeather = Math.min(
-    boundedLength,
+    releaseLength,
     Math.max(LENGTH_EPSILON, featherLength),
-    Math.max(8, boundedLength * 0.1),
+    Math.max(8, releaseLength * 0.1),
   );
-  const eraseFront = progress * boundedLength;
+  const eraseFront = progress * (releaseLength + boundedFeather);
   return smoothstep(
-    (distanceFromTail - eraseFront) / boundedFeather,
+    (releaseDistance - eraseFront) / boundedFeather,
   );
 }
 
