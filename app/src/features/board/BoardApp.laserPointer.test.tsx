@@ -208,6 +208,42 @@ describe('BoardApp laser pointer', () => {
     expect(pathData).toContain('Q');
   });
 
+  it('begins fading from the back on the first frame after release', () => {
+    render(<BoardApp />);
+    activateTool('Laser pointer');
+    const surface = activeDrawingSurface();
+
+    drawPointerEvent(surface, 'down', { x: 100, y: 100 });
+    setClock(50);
+    drawPointerEvent(surface, 'move', { x: 500, y: 100 });
+    const activeBands = Array.from(
+      document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
+    );
+    expect(activeBands.length).toBeGreaterThan(0);
+    expect(
+      activeBands.every(
+        (band) => Number(band.getAttribute('opacity')) === 1,
+      ),
+    ).toBe(true);
+
+    setClock(100);
+    drawPointerEvent(surface, 'up', { x: 500, y: 100 });
+    runAnimationFrame(116);
+
+    const releasedOpacities = Array.from(
+      document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
+    ).map((band) => Number(band.getAttribute('opacity')));
+    expect(releasedOpacities.length).toBeGreaterThan(1);
+    expect(releasedOpacities[0]).toBeLessThan(1);
+    expect(releasedOpacities.at(-1)).toBe(1);
+    expect(
+      releasedOpacities.every(
+        (opacity, index) =>
+          index === 0 || opacity >= releasedOpacities[index - 1],
+      ),
+    ).toBe(true);
+  });
+
   it('evaporates from the oldest end and fully disappears three seconds after release', () => {
     render(<BoardApp />);
     activateTool('Laser pointer');

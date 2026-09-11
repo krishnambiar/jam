@@ -2,8 +2,8 @@ import type { LaserPoint, LaserTrail } from './types';
 
 export const LASER_TRAIL_LIFETIME_MS = 3000;
 export const LASER_TRAIL_FADE_MS = 1200;
-export const LASER_TRAIL_MAX_LENGTH = 820;
-export const LASER_TRAIL_FADE_LENGTH = 150;
+export const LASER_TRAIL_MAX_LENGTH = 920;
+export const LASER_TRAIL_FADE_LENGTH = 170;
 export const LASER_TRAIL_STROKE_WIDTH_PX = 2.5;
 
 const LASER_TRAIL_TAP_LENGTH = 12;
@@ -23,9 +23,7 @@ export function laserTrailOpacity(createdAt: number, now: number) {
   const fadeStart = LASER_TRAIL_LIFETIME_MS - LASER_TRAIL_FADE_MS;
   if (age >= LASER_TRAIL_LIFETIME_MS) return 0;
   if (age <= fadeStart) return 1;
-  return smoothstep(
-    (LASER_TRAIL_LIFETIME_MS - age) / LASER_TRAIL_FADE_MS,
-  );
+  return (LASER_TRAIL_LIFETIME_MS - age) / LASER_TRAIL_FADE_MS;
 }
 
 export function laserPointDistance(start: LaserPoint, end: LaserPoint) {
@@ -47,6 +45,41 @@ export function laserTrailCumulativeLengths(
 
 export function laserTrailLength(points: readonly LaserPoint[]) {
   return laserTrailCumulativeLengths(points).at(-1) ?? 0;
+}
+
+/**
+ * On release, age the tail to the fade boundary and graduate timestamps toward
+ * the just-released head. The existing per-point fade can then start erasing
+ * from the back on the next frame without brightening older active geometry.
+ */
+export function stageLaserTrailForRelease(
+  points: readonly LaserPoint[],
+  endedAt: number,
+) {
+  const cumulativeLengths = laserTrailCumulativeLengths(points);
+  const geometryLength = cumulativeLengths.at(-1) ?? 0;
+  const fadeStart = LASER_TRAIL_LIFETIME_MS - LASER_TRAIL_FADE_MS;
+  const lastIndex = points.length - 1;
+
+  return points.map((point, index) => {
+    if (geometryLength <= LENGTH_EPSILON) {
+      return {
+        ...point,
+        createdAt: Math.min(point.createdAt, endedAt - fadeStart),
+      };
+    }
+
+    if (index === lastIndex) {
+      return { ...point, createdAt: endedAt };
+    }
+
+    const progress = (cumulativeLengths[index] ?? 0) / geometryLength;
+    const stagedCreatedAt = endedAt - fadeStart * (1 - progress);
+    return {
+      ...point,
+      createdAt: Math.min(point.createdAt, stagedCreatedAt),
+    };
+  });
 }
 
 export function laserTrailBudgetLength(points: readonly LaserPoint[]) {

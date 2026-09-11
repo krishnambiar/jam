@@ -19,6 +19,7 @@ import {
   laserTrailCumulativeLengths,
   laserTrailJuiceOpacity,
   laserTrailOpacity,
+  stageLaserTrailForRelease,
   trimLaserTrailsToLength,
 } from '../laserTrail';
 import type { LaserPoint, LaserTrail } from '../types';
@@ -312,15 +313,11 @@ export const LaserTrailLayer = forwardRef<LaserTrailHandle>(
           );
           if (trailIndex < 0) return;
           const trail = trailsRef.current[trailIndex];
-          const lastPoint = trail.points.at(-1);
-          if (!lastPoint) return;
+          if (trail.points.length === 0) return;
           const trails = [...trailsRef.current];
           trails[trailIndex] = {
             ...trail,
-            points: [
-              ...trail.points.slice(0, -1),
-              { ...lastPoint, createdAt: endedAt },
-            ],
+            points: stageLaserTrailForRelease(trail.points, endedAt),
           };
           trailsRef.current = trails;
           nowRef.current = Math.max(nowRef.current, endedAt);
