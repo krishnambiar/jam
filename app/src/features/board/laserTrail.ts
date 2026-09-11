@@ -7,6 +7,8 @@ export const LASER_TRAIL_FADE_LENGTH = 170;
 export const LASER_TRAIL_STROKE_WIDTH_PX = 2.5;
 export const LASER_TRAIL_RELEASE_MS = 600;
 export const LASER_TRAIL_RELEASE_FEATHER_LENGTH = 80;
+export const LASER_TRAIL_RELEASE_FADE_START = 0.6;
+export const LASER_TRAIL_RELEASE_FADE_END = 0.85;
 
 const LASER_TRAIL_TAP_LENGTH = 12;
 const LENGTH_EPSILON = 0.001;
@@ -62,20 +64,31 @@ export function laserTrailReleaseOpacity(
   const boundedLength = Math.max(0, trailLength);
   const progress = clampUnit(elapsed / duration);
   const isTap = boundedLength <= LENGTH_EPSILON;
-  // Give a tap virtual length so its single round cap completes the same
-  // tail-to-head exit instead of surviving until lifecycle cleanup.
-  const releaseLength = isTap ? LASER_TRAIL_TAP_LENGTH : boundedLength;
-  const releaseDistance = isTap ? releaseLength : distanceFromTail;
+  if (isTap) {
+    const tapProgress = clampUnit(
+      progress / LASER_TRAIL_RELEASE_FADE_START,
+    );
+    return 1 - smoothstep(tapProgress);
+  }
 
   const boundedFeather = Math.min(
-    releaseLength,
+    boundedLength,
     Math.max(LENGTH_EPSILON, featherLength),
-    Math.max(8, releaseLength * 0.1),
+    Math.max(8, boundedLength * 0.1),
   );
-  const eraseFront = progress * (releaseLength + boundedFeather);
-  return smoothstep(
-    (releaseDistance - eraseFront) / boundedFeather,
+  // Start one feather behind the tail so releasing does not make the first
+  // pixels jump. The front then moves past the rounded head before cleanup.
+  const eraseFront =
+    progress * (boundedLength + boundedFeather * 2) - boundedFeather;
+  const spatialOpacity = smoothstep(
+    (distanceFromTail - eraseFront) / boundedFeather,
   );
+  const terminalFadeProgress = clampUnit(
+    (progress - LASER_TRAIL_RELEASE_FADE_START) /
+      (LASER_TRAIL_RELEASE_FADE_END - LASER_TRAIL_RELEASE_FADE_START),
+  );
+  const terminalOpacity = 1 - smoothstep(terminalFadeProgress);
+  return Math.min(spatialOpacity, terminalOpacity);
 }
 
 export function laserTrailBudgetLength(points: readonly LaserPoint[]) {

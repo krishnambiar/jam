@@ -54,6 +54,14 @@ function activeDrawingSurface() {
   return surface!;
 }
 
+function renderedLaserTrailCount() {
+  return new Set(
+    Array.from(
+      document.querySelectorAll<SVGGElement>('.laser-trail-band'),
+    ).map((band) => band.dataset.laserTrail),
+  ).size;
+}
+
 function drawPointerEvent(
   surface: HTMLElement,
   type: 'down' | 'move' | 'up',
@@ -167,27 +175,34 @@ describe('BoardApp laser pointer', () => {
       drawPointerEvent(surface, 'move', { x: 500, y: 300 }, 1, pointerType);
 
       const stroke = document.querySelector<SVGPathElement>(
-        '.laser-trail-stroke',
+        '.laser-trail-segment',
+      );
+      const fill = document.querySelector<SVGRectElement>(
+        '.laser-trail-fill',
       );
       expect(stroke).not.toBeNull();
-      expect(stroke).toHaveAttribute('stroke', '#dd4f44');
+      expect(stroke).toHaveAttribute('stroke', 'rgb(255 255 255)');
       expect(stroke).toHaveAttribute(
         'stroke-width',
         String(LASER_TRAIL_STROKE_WIDTH_PX),
       );
       expect(stroke).toHaveAttribute('vector-effect', 'non-scaling-stroke');
       expect(stroke?.getAttribute('d')).toContain('Q');
-      expect(document.querySelectorAll('.laser-trail-stroke')).toHaveLength(1);
-      expect(document.querySelector('.laser-trail-mask-band')).not.toBeNull();
+      expect(document.querySelectorAll('.laser-trail-segment')).toHaveLength(1);
+      expect(document.querySelector('.laser-trail-band')).not.toBeNull();
+      expect(document.querySelectorAll('mask')).toHaveLength(1);
+      expect(fill).toHaveAttribute('fill', '#dd4f44');
+      expect(fill).toHaveAttribute('mask');
+      expect(fill).toHaveAttribute('opacity', '0.94');
       expect(
         document.querySelector(
           '.laser-trail-tip, .laser-trail-run, .laser-trail-glow, .laser-trail-core',
         ),
       ).toBeNull();
-      expect(document.querySelector('.laser-trail circle')).toBeNull();
+      expect(document.querySelector('.laser-trail-layer circle')).toBeNull();
 
       drawPointerEvent(surface, 'up', { x: 500, y: 300 }, 1, pointerType);
-      expect(document.querySelector('.laser-trail')).not.toBeNull();
+      expect(document.querySelector('.laser-trail-fill')).not.toBeNull();
       expect(document.querySelector('.completed-ink-layer')).toBeNull();
     },
   );
@@ -203,7 +218,7 @@ describe('BoardApp laser pointer', () => {
     }
 
     const pathData = document
-      .querySelector<SVGPathElement>('.laser-trail-stroke')
+      .querySelector<SVGPathElement>('.laser-trail-segment')
       ?.getAttribute('d');
     expect(pathData).toContain('M 100 100');
     expect(pathData).toContain('180 100');
@@ -219,12 +234,12 @@ describe('BoardApp laser pointer', () => {
     setClock(50);
     drawPointerEvent(surface, 'move', { x: 500, y: 100 });
     const activeBands = Array.from(
-      document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
+      document.querySelectorAll<SVGGElement>('.laser-trail-band'),
     );
     expect(activeBands.length).toBeGreaterThan(0);
     expect(
       activeBands.every(
-        (band) => Number(band.getAttribute('opacity')) === 1,
+        (band) => Number(band.dataset.laserOpacity) === 1,
       ),
     ).toBe(true);
 
@@ -233,8 +248,8 @@ describe('BoardApp laser pointer', () => {
     runAnimationFrame(116);
 
     const releasedOpacities = Array.from(
-      document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
-    ).map((band) => Number(band.getAttribute('opacity')));
+      document.querySelectorAll<SVGGElement>('.laser-trail-band'),
+    ).map((band) => Number(band.dataset.laserOpacity));
     expect(releasedOpacities.length).toBeGreaterThan(1);
     expect(releasedOpacities[0]).toBeLessThan(1);
     expect(releasedOpacities.at(-1)).toBe(1);
@@ -244,35 +259,81 @@ describe('BoardApp laser pointer', () => {
           index === 0 || opacity >= releasedOpacities[index - 1],
       ),
     ).toBe(true);
+    expect(
+      document.querySelector('[data-laser-cap="head"]'),
+    ).not.toBeNull();
 
     runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS / 2);
     const firstVisibleSegment = document.querySelector<SVGPathElement>(
-      '.laser-trail-mask-segment',
+      '.laser-trail-segment',
     );
     const firstVisibleDistance = Number(
       firstVisibleSegment
         ?.getAttribute('stroke-dasharray')
         ?.split(' ')[1],
     );
-    expect(firstVisibleDistance).toBeGreaterThan(210);
-    expect(firstVisibleDistance).toBeLessThan(225);
+    expect(firstVisibleDistance).toBeGreaterThan(195);
+    expect(firstVisibleDistance).toBeLessThan(210);
 
     const halfwayOpacities = Array.from(
-      document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
-    ).map((band) => Number(band.getAttribute('opacity')));
+      document.querySelectorAll<SVGGElement>('.laser-trail-band'),
+    ).map((band) => Number(band.dataset.laserOpacity));
     expect(halfwayOpacities[0]).toBeLessThan(0.1);
     expect(halfwayOpacities.at(-1)).toBe(1);
 
     runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS * 0.75);
-    expect(document.querySelector('.laser-trail-stroke')).not.toBeNull();
+    expect(document.querySelector('.laser-trail-segment')).not.toBeNull();
+    expect(
+      document.querySelector('[data-laser-cap="head"]'),
+    ).not.toBeNull();
+    const terminalOpacities = Array.from(
+      document.querySelectorAll<SVGGElement>('.laser-trail-band'),
+    ).map((band) => Number(band.dataset.laserOpacity));
+    expect(Math.max(...terminalOpacities)).toBeLessThan(0.4);
 
-    runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS * 0.92);
-    expect(document.querySelector('.laser-trail-stroke')).toBeNull();
-    expect(document.querySelector('.laser-trail-mask-band')).toBeNull();
-    expect(document.querySelector('.laser-trail-mask-cap')).toBeNull();
+    runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS * 0.83);
+    const lateBands = Array.from(
+      document.querySelectorAll<SVGGElement>('.laser-trail-band'),
+    );
+    const finalBand = lateBands.at(-1);
+    const finalSegment = finalBand?.querySelector<SVGPathElement>(
+      '.laser-trail-segment',
+    );
+    const finalHead = finalBand?.querySelector<SVGPathElement>(
+      '[data-laser-cap="head"]',
+    );
+    expect(lateBands.length).toBeGreaterThan(0);
+    expect(
+      Math.max(...lateBands.map((band) => Number(band.dataset.laserOpacity))),
+    ).toBeLessThan(0.03);
+    expect(finalHead).not.toBeNull();
+    expect(finalHead?.getAttribute('stroke')).toBe(
+      finalSegment?.getAttribute('stroke'),
+    );
+    expect(finalHead).toHaveAttribute(
+      'stroke-width',
+      String(LASER_TRAIL_STROKE_WIDTH_PX),
+    );
+    expect(document.querySelectorAll('.laser-trail-cap')).toHaveLength(1);
+    lateBands.forEach((band) => {
+      const expectedChannel = Math.round(
+        Number(band.dataset.laserOpacity) * 255,
+      );
+      const expectedStroke = `rgb(${expectedChannel} ${expectedChannel} ${expectedChannel})`;
+      const segment = band.querySelector('.laser-trail-segment');
+      expect(segment).toHaveAttribute('stroke', expectedStroke);
+      expect(segment).not.toHaveAttribute('opacity');
+      expect(segment).not.toHaveAttribute('stroke-opacity');
+    });
+
+    runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS * 0.85);
+    expect(document.querySelector('.laser-trail-segment')).toBeNull();
+    expect(document.querySelector('.laser-trail-band')).toBeNull();
+    expect(document.querySelector('.laser-trail-cap')).toBeNull();
+    expect(animationFrames.size).toBe(0);
 
     runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS + 1);
-    expect(document.querySelector('.laser-trail')).toBeNull();
+    expect(document.querySelector('.laser-trail-fill')).toBeNull();
     expect(animationFrames.size).toBe(0);
   });
 
@@ -286,18 +347,109 @@ describe('BoardApp laser pointer', () => {
     drawPointerEvent(surface, 'up', { x: 240, y: 180 });
 
     runAnimationFrame(116);
-    expect(document.querySelector('.laser-trail-stroke')).not.toBeNull();
+    expect(document.querySelector('.laser-trail-segment')).not.toBeNull();
+    expect(
+      document.querySelector('[data-laser-cap="head"]'),
+    ).not.toBeNull();
 
     runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS / 2);
-    expect(document.querySelector('.laser-trail-stroke')).not.toBeNull();
+    expect(document.querySelector('.laser-trail-segment')).not.toBeNull();
 
     runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS * 0.6);
-    expect(document.querySelector('.laser-trail-stroke')).toBeNull();
-    expect(document.querySelector('.laser-trail-mask-band')).toBeNull();
-    expect(document.querySelector('.laser-trail-mask-cap')).toBeNull();
+    expect(document.querySelector('.laser-trail-segment')).toBeNull();
+    expect(document.querySelector('.laser-trail-band')).toBeNull();
+    expect(document.querySelector('.laser-trail-cap')).toBeNull();
 
     runAnimationFrame(100 + LASER_TRAIL_RELEASE_MS + 1);
     expect(animationFrames.size).toBe(0);
+  });
+
+  it('does not re-expose an erased branch where the trail crosses itself', () => {
+    render(<BoardApp />);
+    activateTool('Laser pointer');
+    const surface = activeDrawingSurface();
+
+    drawPointerEvent(surface, 'down', { x: 200, y: 200 });
+    setClock(10);
+    drawPointerEvent(surface, 'move', { x: 100, y: 100 });
+    setClock(20);
+    drawPointerEvent(surface, 'move', { x: 100, y: 300 });
+    setClock(30);
+    drawPointerEvent(surface, 'move', { x: 300, y: 100 });
+    setClock(40);
+    drawPointerEvent(surface, 'move', { x: 300, y: 300 });
+    setClock(50);
+    drawPointerEvent(surface, 'up', { x: 300, y: 300 });
+
+    runAnimationFrame(50 + LASER_TRAIL_RELEASE_MS * 0.35);
+
+    const bands = Array.from(
+      document.querySelectorAll<SVGGElement>('.laser-trail-band'),
+    ).map((band) => ({
+      end: Number(band.dataset.laserEnd),
+      start: Number(band.dataset.laserStart),
+    }));
+    const laterCrossingDistance =
+      Math.hypot(100, 100) + 200 + Math.hypot(100, 100);
+
+    expect(bands.length).toBeGreaterThan(0);
+    expect(bands.every((band) => band.start > 0)).toBe(true);
+    expect(
+      bands.some(
+        (band) =>
+          band.start <= laterCrossingDistance &&
+          band.end >= laterCrossingDistance,
+      ),
+    ).toBe(true);
+    const mask = document.querySelector<SVGMaskElement>('mask');
+    expect(document.querySelectorAll('mask')).toHaveLength(1);
+    expect(mask?.style.getPropertyValue('mask-type')).toBe('luminance');
+    expect(
+      document.querySelectorAll('.laser-trail-fill[mask]'),
+    ).toHaveLength(1);
+    expect(
+      document.querySelector('.laser-trail-band[mask], .laser-trail-band [mask]'),
+    ).toBeNull();
+    expect(document.querySelector('[data-laser-cap="tail"]')).toBeNull();
+    const headCaps = document.querySelectorAll<SVGPathElement>(
+      '[data-laser-cap="head"]',
+    );
+    expect(headCaps).toHaveLength(1);
+    expect(headCaps[0].getAttribute('d')).toContain('M 300 300');
+    const segments = Array.from(
+      document.querySelectorAll<SVGPathElement>('.laser-trail-segment'),
+    );
+    expect(segments).toHaveLength(bands.length);
+    segments.forEach((segment) => {
+      expect(segment.getAttribute('stroke') ?? '').toMatch(
+        /^rgb\((\d+) \1 \1\)$/,
+      );
+      expect(segment).toHaveAttribute('stroke-dasharray');
+      expect(segment).not.toHaveAttribute('opacity');
+      expect(segment).not.toHaveAttribute('stroke-opacity');
+    });
+    Array.from(
+      document.querySelectorAll<SVGPathElement>('.laser-trail-cap'),
+    ).forEach((cap) => {
+      expect(cap).not.toHaveAttribute('opacity');
+      expect(cap).not.toHaveAttribute('stroke-opacity');
+    });
+    expect(
+      Array.from(
+        document.querySelectorAll<SVGGElement>('.laser-trail-band'),
+      ).every((band) => !band.hasAttribute('opacity')),
+    ).toBe(true);
+    expect(
+      Array.from(document.querySelectorAll<SVGPathElement>('path')).filter(
+        (path) => path.getAttribute('stroke') === '#dd4f44',
+      ),
+    ).toHaveLength(0);
+    expect(headCaps[0].getAttribute('stroke')).toBe(
+      headCaps[0]
+        .closest('.laser-trail-band')
+        ?.querySelector('.laser-trail-segment')
+        ?.getAttribute('stroke'),
+    );
   });
 
   it('evaporates from the oldest end and quickly disappears after release', () => {
@@ -311,12 +463,12 @@ describe('BoardApp laser pointer', () => {
     setClock(2200);
     drawPointerEvent(surface, 'move', { x: 500, y: 300 });
     expect(
-      document.querySelector('.laser-trail-stroke')?.getAttribute('d'),
+      document.querySelector('.laser-trail-segment')?.getAttribute('d'),
     ).toContain('100 100');
 
     runAnimationFrame(3101);
     const remainingPath = document
-      .querySelector<SVGPathElement>('.laser-trail-stroke')
+      .querySelector<SVGPathElement>('.laser-trail-segment')
       ?.getAttribute('d');
     expect(remainingPath).not.toContain('100 100');
     expect(remainingPath).toContain('300 200');
@@ -325,15 +477,17 @@ describe('BoardApp laser pointer', () => {
     drawPointerEvent(surface, 'up', { x: 500, y: 300 });
     runAnimationFrame(3101 + LASER_TRAIL_RELEASE_MS / 2);
     const fadingBands = Array.from(
-      document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
+      document.querySelectorAll<SVGGElement>('.laser-trail-band'),
     );
     expect(fadingBands.length).toBeGreaterThan(1);
     expect(
-      Math.max(...fadingBands.map((band) => Number(band.getAttribute('opacity')))),
+      Math.max(
+        ...fadingBands.map((band) => Number(band.dataset.laserOpacity)),
+      ),
     ).toBe(1);
 
     runAnimationFrame(3101 + LASER_TRAIL_RELEASE_MS + 1);
-    expect(document.querySelector('.laser-trail')).toBeNull();
+    expect(document.querySelector('.laser-trail-fill')).toBeNull();
     expect(animationFrames.size).toBe(0);
   });
 
@@ -344,11 +498,11 @@ describe('BoardApp laser pointer', () => {
 
     drawPointerEvent(surface, 'down', { x: 240, y: 180 }, 3);
     runAnimationFrame(LASER_TRAIL_LIFETIME_MS + 500);
-    expect(document.querySelector('.laser-trail-stroke')).not.toBeNull();
+    expect(document.querySelector('.laser-trail-segment')).not.toBeNull();
     expect(capturedPointers.has(3)).toBe(true);
 
     fireEvent(window, new Event('blur'));
-    expect(document.querySelector('.laser-trail')).toBeNull();
+    expect(document.querySelector('.laser-trail-fill')).toBeNull();
     expect(releasePointerCapture).toHaveBeenCalledWith(3);
     expect(animationFrames.size).toBe(0);
   });
@@ -363,16 +517,36 @@ describe('BoardApp laser pointer', () => {
     drawPointerEvent(surface, 'up', { x: 360, y: 220 }, 4);
 
     setClock(LASER_TRAIL_RELEASE_MS / 2);
-    drawPointerEvent(surface, 'down', { x: 500, y: 300 }, 5);
-    drawPointerEvent(surface, 'move', { x: 680, y: 420 }, 5);
-    drawPointerEvent(surface, 'up', { x: 760, y: 480 }, 5);
-    expect(document.querySelectorAll('.laser-trail')).toHaveLength(2);
+    drawPointerEvent(surface, 'down', { x: 100, y: 220 }, 5);
+    drawPointerEvent(surface, 'move', { x: 280, y: 140 }, 5);
+    drawPointerEvent(surface, 'up', { x: 360, y: 100 }, 5);
+    expect(renderedLaserTrailCount()).toBe(2);
+    expect(document.querySelectorAll('.laser-trail-fill')).toHaveLength(1);
+    expect(document.querySelectorAll('mask')).toHaveLength(1);
+
+    runAnimationFrame((LASER_TRAIL_RELEASE_MS * 2) / 3);
+    const globalMaskOpacities = Array.from(
+      document.querySelectorAll<SVGGElement>('.laser-trail-band'),
+    ).map((band) => Number(band.dataset.laserOpacity));
+    expect(
+      globalMaskOpacities.every(
+        (opacity, index) =>
+          index === 0 || opacity >= globalMaskOpacities[index - 1],
+      ),
+    ).toBe(true);
+    expect(
+      new Set(
+        Array.from(
+          document.querySelectorAll<SVGGElement>('.laser-trail-band'),
+        ).map((band) => band.dataset.laserTrail),
+      ).size,
+    ).toBe(2);
 
     runAnimationFrame(LASER_TRAIL_RELEASE_MS + 1);
-    expect(document.querySelectorAll('.laser-trail')).toHaveLength(1);
+    expect(renderedLaserTrailCount()).toBe(1);
 
     runAnimationFrame(LASER_TRAIL_RELEASE_MS * 1.5 + 1);
-    expect(document.querySelector('.laser-trail')).toBeNull();
+    expect(document.querySelector('.laser-trail-fill')).toBeNull();
   });
 
   it('does not create history or clear the existing redo stack', () => {
@@ -394,13 +568,13 @@ describe('BoardApp laser pointer', () => {
     drawPointerEvent(surface, 'down', { x: 160, y: 160 }, 2);
     drawPointerEvent(surface, 'move', { x: 420, y: 260 }, 2);
     drawPointerEvent(surface, 'up', { x: 600, y: 320 }, 2);
-    expect(document.querySelector('.laser-trail')).not.toBeNull();
+    expect(document.querySelector('.laser-trail-fill')).not.toBeNull();
     expect(document.querySelector('.completed-ink-layer')).toBeNull();
     expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Redo' })).toBeEnabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Redo' }));
-    expect(document.querySelector('.laser-trail')).toBeNull();
+    expect(document.querySelector('.laser-trail-fill')).toBeNull();
     expect(document.querySelector('.completed-ink-layer')).not.toBeNull();
   });
 
@@ -411,7 +585,7 @@ describe('BoardApp laser pointer', () => {
 
     drawPointerEvent(surface, 'down', { x: 140, y: 180 }, 7);
     drawPointerEvent(surface, 'move', { x: 460, y: 300 }, 7);
-    expect(document.querySelector('.laser-trail')).not.toBeNull();
+    expect(document.querySelector('.laser-trail-fill')).not.toBeNull();
     expect(capturedPointers.has(7)).toBe(true);
     expect(animationFrames.size).toBe(1);
 
@@ -424,7 +598,7 @@ describe('BoardApp laser pointer', () => {
       'true',
     );
     expect(document.querySelector('.drawing-surface')).toBeNull();
-    expect(document.querySelector('.laser-trail')).toBeNull();
+    expect(document.querySelector('.laser-trail-fill')).toBeNull();
     expect(releasePointerCapture).toHaveBeenCalledWith(7);
     expect(animationFrames.size).toBe(0);
   });
@@ -438,17 +612,17 @@ describe('BoardApp laser pointer', () => {
     drawPointerEvent(surface, 'move', { x: 1500, y: 100 });
 
     const stroke = document.querySelector<SVGPathElement>(
-      '.laser-trail-stroke',
+      '.laser-trail-segment',
     );
     const firstX = Number(
       stroke?.getAttribute('d')?.match(/^M ([\d.]+)/)?.[1],
     );
     expect(firstX).toBeCloseTo(1500 - LASER_TRAIL_MAX_LENGTH);
-    expect(document.querySelectorAll('.laser-trail-stroke')).toHaveLength(1);
+    expect(renderedLaserTrailCount()).toBe(1);
 
     const opacities = Array.from(
-      document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
-    ).map((band) => Number(band.getAttribute('opacity')));
+      document.querySelectorAll<SVGGElement>('.laser-trail-band'),
+    ).map((band) => Number(band.dataset.laserOpacity));
     expect(opacities.length).toBeGreaterThan(20);
     expect(opacities.length).toBeLessThanOrEqual(97);
     expect(Math.min(...opacities)).toBeLessThan(0.1);
@@ -466,7 +640,7 @@ describe('BoardApp laser pointer', () => {
     ).toBe(true);
     expect(
       Array.from(
-        document.querySelectorAll('.laser-trail-mask-segment'),
+        document.querySelectorAll('.laser-trail-segment'),
       ).every((segment) => segment.getAttribute('stroke-linecap') === 'butt'),
     ).toBe(true);
   });
@@ -491,15 +665,19 @@ describe('laser trail evaporation', () => {
   it('uses a fast localized release front instead of fading the whole trail', () => {
     const halfway = LASER_TRAIL_RELEASE_MS / 2;
 
+    expect(laserTrailReleaseOpacity(0, 400, 0)).toBe(1);
+    const firstFrameTail = laserTrailReleaseOpacity(0, 400, 16);
+    expect(firstFrameTail).toBeGreaterThan(0);
+    expect(firstFrameTail).toBeLessThan(1);
     expect(laserTrailReleaseOpacity(0, 400, halfway)).toBe(0);
-    expect(laserTrailReleaseOpacity(219, 400, halfway)).toBe(0);
-    expect(laserTrailReleaseOpacity(220, 400, halfway)).toBe(0);
-    expect(laserTrailReleaseOpacity(240, 400, halfway)).toBeCloseTo(0.5);
-    expect(laserTrailReleaseOpacity(260, 400, halfway)).toBe(1);
+    expect(laserTrailReleaseOpacity(199, 400, halfway)).toBe(0);
+    expect(laserTrailReleaseOpacity(200, 400, halfway)).toBe(0);
+    expect(laserTrailReleaseOpacity(220, 400, halfway)).toBeCloseTo(0.5);
+    expect(laserTrailReleaseOpacity(240, 400, halfway)).toBe(1);
     expect(laserTrailReleaseOpacity(400, 400, halfway)).toBe(1);
     expect(laserTrailReleaseOpacity(400, 400, LASER_TRAIL_RELEASE_MS)).toBe(0);
     expect(laserTrailReleaseOpacity(1, 1, 0)).toBe(1);
-    expect(laserTrailReleaseOpacity(1, 1, halfway)).toBe(0);
+    expect(laserTrailReleaseOpacity(1, 1, halfway)).toBeCloseTo(0.5);
 
     const tapHalfwayOpacity = laserTrailReleaseOpacity(0, 0, halfway);
     expect(laserTrailReleaseOpacity(0, 0, 0)).toBe(1);
@@ -509,25 +687,25 @@ describe('laser trail evaporation', () => {
       laserTrailReleaseOpacity(0, 0, LASER_TRAIL_RELEASE_MS * 0.6),
     ).toBe(0);
 
-    const nearNormalTrailEnd = laserTrailReleaseOpacity(
+    const terminalHeadOpacity = laserTrailReleaseOpacity(
       400,
       400,
-      LASER_TRAIL_RELEASE_MS * 0.9,
+      LASER_TRAIL_RELEASE_MS * 0.75,
     );
-    expect(nearNormalTrailEnd).toBeGreaterThan(0);
-    expect(nearNormalTrailEnd).toBeLessThan(0.05);
+    expect(terminalHeadOpacity).toBeGreaterThan(0);
+    expect(terminalHeadOpacity).toBeLessThan(0.4);
     expect(
       laserTrailReleaseOpacity(
         400,
         400,
-        LASER_TRAIL_RELEASE_MS * 0.92,
+        LASER_TRAIL_RELEASE_MS * 0.85,
       ),
     ).toBe(0);
     expect(
       laserTrailReleaseOpacity(
         LASER_TRAIL_MAX_LENGTH,
         LASER_TRAIL_MAX_LENGTH,
-        LASER_TRAIL_RELEASE_MS * 0.925,
+        LASER_TRAIL_RELEASE_MS * 0.85,
       ),
     ).toBe(0);
   });

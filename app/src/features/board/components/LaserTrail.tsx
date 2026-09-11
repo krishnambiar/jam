@@ -14,6 +14,7 @@ import {
   getDrawingColorValue,
 } from '../constants';
 import {
+  LASER_TRAIL_RELEASE_FADE_END,
   LASER_TRAIL_RELEASE_MS,
   LASER_TRAIL_STROKE_WIDTH_PX,
   laserTrailBudgetLength,
@@ -33,17 +34,34 @@ export type LaserTrailHandle = {
   startTrail: (trailId: string, point: LaserPoint) => void;
 };
 
-type LaserMaskBand = {
+type LaserPaintBand = {
   end: number;
   opacity: number;
   start: number;
 };
 
+type RenderedLaserTrail = {
+  bands: LaserPaintBand[];
+  firstPoint: LaserPoint;
+  id: string;
+  isActive: boolean;
+  isTap: boolean;
+  lastPoint: LaserPoint;
+  pathData: string;
+  pathLength: number;
+};
+
+type RenderedLaserBand = {
+  band: LaserPaintBand;
+  bandIndex: number;
+  paintOrder: number;
+  trail: RenderedLaserTrail;
+};
+
 const LASER_COLOR = getDrawingColorValue('red');
 const LASER_POINT_MINIMUM_DISTANCE = 4;
 const LASER_POINT_MAXIMUM_SPACING = 12;
-const LASER_MASK_OPACITY_STEPS = 96;
-const LASER_MASK_STROKE_WIDTH_PX = LASER_TRAIL_STROKE_WIDTH_PX + 2;
+const LASER_OPACITY_STEPS = 96;
 const MASK_BOUNDS_PADDING = 20;
 const LENGTH_EPSILON = 0.001;
 
@@ -149,8 +167,8 @@ function visibleLaserPoints(
   return refreshedPoints.slice(Math.max(0, firstVisibleIndex - 1));
 }
 
-function appendMaskBand(
-  bands: LaserMaskBand[],
+function appendPaintBand(
+  bands: LaserPaintBand[],
   start: number,
   end: number,
   opacity: number,
@@ -158,8 +176,8 @@ function appendMaskBand(
   if (end - start <= LENGTH_EPSILON || opacity <= 0.001) return;
 
   const roundedOpacity =
-    Math.round(Math.min(1, opacity) * LASER_MASK_OPACITY_STEPS) /
-    LASER_MASK_OPACITY_STEPS;
+    Math.round(Math.min(1, opacity) * LASER_OPACITY_STEPS) /
+    LASER_OPACITY_STEPS;
   if (roundedOpacity <= 0) return;
   const previous = bands.at(-1);
   if (
@@ -174,7 +192,7 @@ function appendMaskBand(
   bands.push({ start, end, opacity: roundedOpacity });
 }
 
-function laserMaskBands(
+function laserPaintBands(
   cumulativeLengths: readonly number[],
   pointOpacities: readonly number[],
 ) {
@@ -186,7 +204,7 @@ function laserMaskBands(
       : [];
   }
 
-  const bands: LaserMaskBand[] = [];
+  const bands: LaserPaintBand[] = [];
   for (let index = 0; index < cumulativeLengths.length - 1; index += 1) {
     const segmentStart = cumulativeLengths[index];
     const segmentEnd = cumulativeLengths[index + 1];
@@ -199,7 +217,7 @@ function laserMaskBands(
       1,
       Math.ceil(
         Math.abs(endOpacity - startOpacity) *
-          LASER_MASK_OPACITY_STEPS *
+          LASER_OPACITY_STEPS *
           2,
       ),
     );
@@ -208,7 +226,7 @@ function laserMaskBands(
       const startRatio = step / subdivisions;
       const endRatio = (step + 1) / subdivisions;
       const midpointRatio = (startRatio + endRatio) / 2;
-      appendMaskBand(
+      appendPaintBand(
         bands,
         segmentStart + segmentLength * startRatio,
         segmentStart + segmentLength * endRatio,
@@ -219,7 +237,7 @@ function laserMaskBands(
   return bands;
 }
 
-function bandDashArray(band: LaserMaskBand, pathLength: number) {
+function bandDashArray(band: LaserPaintBand, pathLength: number) {
   const bandLength = Math.max(LENGTH_EPSILON, band.end - band.start);
   const trailingGap = pathLength + 1;
   return band.start <= LENGTH_EPSILON
@@ -227,10 +245,15 @@ function bandDashArray(band: LaserMaskBand, pathLength: number) {
     : `0 ${band.start} ${bandLength} ${trailingGap}`;
 }
 
+function maskStrokeColor(opacity: number) {
+  const channel = Math.round(Math.min(1, Math.max(0, opacity)) * 255);
+  return `rgb(${channel} ${channel} ${channel})`;
+}
+
 export const LaserTrailLayer = forwardRef<LaserTrailHandle>(
   function LaserTrailLayer(_, ref) {
     const [, redraw] = useReducer((version: number) => version + 1, 0);
-    const maskIdPrefix = useId().replace(/[^a-zA-Z0-9_-]/g, '');
+    const maskId = `laser-mask-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
     const trailsRef = useRef<LaserTrail[]>([]);
     const activeTrailIdsRef = useRef<Set<string>>(new Set());
     const nowRef = useRef(performance.now());
@@ -244,7 +267,8 @@ export const LaserTrailLayer = forwardRef<LaserTrailHandle>(
           trailsRef.current.flatMap((trail) => {
             if (
               trail.endedAt !== undefined &&
-              now - trail.endedAt >= LASER_TRAIL_RELEASE_MS
+              now - trail.endedAt >=
+                LASER_TRAIL_RELEASE_MS * LASER_TRAIL_RELEASE_FADE_END
             ) {
               return [];
             }
@@ -378,120 +402,173 @@ export const LaserTrailLayer = forwardRef<LaserTrailHandle>(
       newerLength += laserTrailBudgetLength(trail.points);
     }
 
-    return trailsRef.current.map((trail) => {
-      const cumulativeLengths = laserTrailCumulativeLengths(trail.points);
-      const geometryLength = cumulativeLengths.at(-1) ?? 0;
-      const budgetLength = laserTrailBudgetLength(trail.points);
-      const newerTrailLength = newerLengthByTrailId.get(trail.id) ?? 0;
-      const pointOpacities = trail.points.map((point, index) => {
-        const distanceAlongTrail = cumulativeLengths[index] ?? 0;
-        const distanceFromTrailTip =
-          geometryLength > LENGTH_EPSILON
-            ? ((geometryLength - distanceAlongTrail) / geometryLength) *
-              budgetLength
-            : budgetLength / 2;
-        const baseOpacity =
-          laserTrailOpacity(
-            point.createdAt,
-            trail.endedAt ?? nowRef.current,
-          ) *
-          laserTrailJuiceOpacity(
-            newerTrailLength + distanceFromTrailTip,
-            totalBudgetLength,
-          );
-        if (trail.endedAt === undefined) return baseOpacity;
-        return Math.min(
-          baseOpacity,
-          laserTrailReleaseOpacity(
-            distanceAlongTrail,
-            geometryLength,
-            nowRef.current - trail.endedAt,
-          ),
+    const renderedTrails = trailsRef.current.flatMap<RenderedLaserTrail>(
+      (trail) => {
+        const cumulativeLengths = laserTrailCumulativeLengths(
+          trail.points,
         );
-      });
-      const bands = laserMaskBands(cumulativeLengths, pointOpacities);
-      if (bands.length === 0) return null;
+        const geometryLength = cumulativeLengths.at(-1) ?? 0;
+        const budgetLength = laserTrailBudgetLength(trail.points);
+        const newerTrailLength = newerLengthByTrailId.get(trail.id) ?? 0;
+        const pointOpacities = trail.points.map((point, index) => {
+          const distanceAlongTrail = cumulativeLengths[index] ?? 0;
+          const distanceFromTrailTip =
+            geometryLength > LENGTH_EPSILON
+              ? ((geometryLength - distanceAlongTrail) /
+                  geometryLength) *
+                budgetLength
+              : budgetLength / 2;
+          const baseOpacity =
+            laserTrailOpacity(
+              point.createdAt,
+              trail.endedAt ?? nowRef.current,
+            ) *
+            laserTrailJuiceOpacity(
+              newerTrailLength + distanceFromTrailTip,
+              totalBudgetLength,
+            );
+          if (trail.endedAt === undefined) return baseOpacity;
+          return Math.min(
+            baseOpacity,
+            laserTrailReleaseOpacity(
+              distanceAlongTrail,
+              geometryLength,
+              nowRef.current - trail.endedAt,
+            ),
+          );
+        });
+        const bands = laserPaintBands(
+          cumulativeLengths,
+          pointOpacities,
+        );
+        if (bands.length === 0) return [];
 
-      const pathData = strokePath(trail.points);
-      const pathLength = Math.max(0.01, geometryLength);
-      const firstPoint = trail.points[0];
-      const lastPoint = trail.points.at(-1)!;
-      const maskId = `laser-mask-${maskIdPrefix}-${trail.id.replace(
-        /[^a-zA-Z0-9_-]/g,
-        '',
-      )}`;
+        const pathData = strokePath(trail.points);
+        const pathLength = Math.max(0.01, geometryLength);
+        const firstPoint = trail.points[0];
+        const lastPoint = trail.points.at(-1)!;
+        const isActive = trail.endedAt === undefined;
+        const isTap = geometryLength <= LENGTH_EPSILON;
+        return [
+          {
+            bands,
+            firstPoint,
+            id: trail.id,
+            isActive,
+            isTap,
+            lastPoint,
+            pathData,
+            pathLength,
+          },
+        ];
+      },
+    );
 
-      return (
-        <g className="laser-trail" data-laser-trail={trail.id} key={trail.id}>
-          <defs>
-            <mask
-              height={BOARD_HEIGHT + MASK_BOUNDS_PADDING * 2}
-              id={maskId}
-              maskUnits="userSpaceOnUse"
-              style={{ maskType: 'alpha' }}
-              width={BOARD_WIDTH + MASK_BOUNDS_PADDING * 2}
-              x={-MASK_BOUNDS_PADDING}
-              y={-MASK_BOUNDS_PADDING}
-            >
-              {bands.map((band, bandIndex) => (
+    if (renderedTrails.length === 0) return null;
+
+    let paintOrder = 0;
+    // Opaque grayscale bands emulate max-opacity compositing when painted
+    // dimmest first, so crossings cannot darken or punch holes in the trail.
+    const renderedBands = renderedTrails
+      .flatMap<RenderedLaserBand>((trail) =>
+        trail.bands.map((band, bandIndex) => ({
+          band,
+          bandIndex,
+          paintOrder: paintOrder++,
+          trail,
+        })),
+      )
+      .sort(
+        (left, right) =>
+          left.band.opacity - right.band.opacity ||
+          left.paintOrder - right.paintOrder,
+      );
+
+    return (
+      <>
+        <defs>
+          <mask
+            height={BOARD_HEIGHT + MASK_BOUNDS_PADDING * 2}
+            id={maskId}
+            maskUnits="userSpaceOnUse"
+            style={{ maskType: 'luminance' }}
+            width={BOARD_WIDTH + MASK_BOUNDS_PADDING * 2}
+            x={-MASK_BOUNDS_PADDING}
+            y={-MASK_BOUNDS_PADDING}
+          >
+            {renderedBands.map(({ band, bandIndex, trail }) => {
+              const maskColor = maskStrokeColor(band.opacity);
+              const isFirstBand = bandIndex === 0;
+              const isLastBand = bandIndex === trail.bands.length - 1;
+
+              return (
                 <g
-                  className="laser-trail-mask-band"
-                  key={bandIndex}
-                  opacity={band.opacity}
+                  className="laser-trail-band"
+                  data-laser-end={band.end}
+                  data-laser-opacity={band.opacity}
+                  data-laser-start={band.start}
+                  data-laser-trail={trail.id}
+                  key={`${trail.id}-${bandIndex}`}
                 >
                   <path
-                    className="laser-trail-mask-segment"
-                    d={pathData}
+                    className="laser-trail-segment"
+                    d={trail.pathData}
                     fill="none"
-                    pathLength={pathLength}
-                    stroke="#fff"
-                    strokeDasharray={bandDashArray(band, pathLength)}
+                    pathLength={trail.pathLength}
+                    stroke={maskColor}
+                    strokeDasharray={bandDashArray(
+                      band,
+                      trail.pathLength,
+                    )}
                     strokeLinecap="butt"
-                    strokeWidth={LASER_MASK_STROKE_WIDTH_PX}
+                    strokeLinejoin="round"
+                    strokeWidth={LASER_TRAIL_STROKE_WIDTH_PX}
                     vectorEffect="non-scaling-stroke"
                   />
-                  {bandIndex === 0 && band.start <= LENGTH_EPSILON ? (
+                  {trail.isActive &&
+                  !trail.isTap &&
+                  isFirstBand &&
+                  band.start <= LENGTH_EPSILON ? (
                     <path
-                      className="laser-trail-mask-cap"
-                      d={strokePath([firstPoint])}
+                      className="laser-trail-cap"
+                      data-laser-cap="tail"
+                      d={strokePath([trail.firstPoint])}
                       fill="none"
-                      stroke="#fff"
+                      stroke={maskColor}
                       strokeLinecap="round"
-                      strokeWidth={LASER_MASK_STROKE_WIDTH_PX}
+                      strokeWidth={LASER_TRAIL_STROKE_WIDTH_PX}
                       vectorEffect="non-scaling-stroke"
                     />
                   ) : null}
-                  {bandIndex === bands.length - 1 &&
-                  band.end >= pathLength - LENGTH_EPSILON ? (
+                  {isLastBand &&
+                  band.end >= trail.pathLength - LENGTH_EPSILON ? (
                     <path
-                      className="laser-trail-mask-cap"
-                      d={strokePath([lastPoint])}
+                      className="laser-trail-cap"
+                      data-laser-cap="head"
+                      d={strokePath([trail.lastPoint])}
                       fill="none"
-                      stroke="#fff"
+                      stroke={maskColor}
                       strokeLinecap="round"
-                      strokeWidth={LASER_MASK_STROKE_WIDTH_PX}
+                      strokeWidth={LASER_TRAIL_STROKE_WIDTH_PX}
                       vectorEffect="non-scaling-stroke"
                     />
                   ) : null}
                 </g>
-              ))}
-            </mask>
-          </defs>
-          <path
-            className="laser-trail-stroke"
-            d={pathData}
-            fill="none"
-            mask={`url(#${maskId})`}
-            pathLength={pathLength}
-            stroke={LASER_COLOR}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeOpacity={0.94}
-            strokeWidth={LASER_TRAIL_STROKE_WIDTH_PX}
-            vectorEffect="non-scaling-stroke"
-          />
-        </g>
-      );
-    });
+              );
+            })}
+          </mask>
+        </defs>
+        <rect
+          className="laser-trail-fill"
+          fill={LASER_COLOR}
+          height={BOARD_HEIGHT + MASK_BOUNDS_PADDING * 2}
+          mask={`url(#${maskId})`}
+          opacity={0.94}
+          width={BOARD_WIDTH + MASK_BOUNDS_PADDING * 2}
+          x={-MASK_BOUNDS_PADDING}
+          y={-MASK_BOUNDS_PADDING}
+        />
+      </>
+    );
   },
 );
