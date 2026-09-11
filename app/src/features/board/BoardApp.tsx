@@ -2782,17 +2782,23 @@ export default function BoardApp() {
     const coalescedEvents = event.nativeEvent.getCoalescedEvents?.() ?? [];
     const samples =
       coalescedEvents.length > 0 ? coalescedEvents : [event.nativeEvent];
-    const createdAt = performance.now();
+    const capturedAt = performance.now();
+    const newestSampleTimestamp =
+      samples.at(-1)?.timeStamp ?? event.nativeEvent.timeStamp;
     const points: LaserPoint[] = samples.map((sample) => {
       const point = boardPoint(
         sample.clientX,
         sample.clientY,
         gesture.boardRect,
       );
+      const sampleAge = Math.min(
+        1000,
+        Math.max(0, newestSampleTimestamp - sample.timeStamp),
+      );
       return {
         x: clamp(point.x, 0, BOARD_WIDTH),
         y: clamp(point.y, 0, BOARD_HEIGHT),
-        createdAt,
+        createdAt: capturedAt - sampleAge,
       };
     });
     activeLaserRendererRef.current?.appendPoints(gesture.trailId, points);

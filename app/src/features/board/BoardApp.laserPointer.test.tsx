@@ -4,7 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import BoardApp from './BoardApp';
 import {
   LASER_TRAIL_LIFETIME_MS,
+  LASER_TRAIL_MAX_LENGTH,
+  LASER_TRAIL_STROKE_WIDTH_PX,
+  laserTrailBudgetLength,
+  laserTrailJuiceOpacity,
   laserTrailOpacity,
+  trimLaserTrailsToLength,
 } from './laserTrail';
 
 const BOARD_RECT = {
@@ -159,17 +164,49 @@ describe('BoardApp laser pointer', () => {
       drawPointerEvent(surface, 'move', { x: 300, y: 200 }, 1, pointerType);
       drawPointerEvent(surface, 'move', { x: 500, y: 300 }, 1, pointerType);
 
-      const core = document.querySelector<SVGPathElement>('.laser-trail-core');
-      expect(core).not.toBeNull();
-      expect(core).toHaveAttribute('stroke', '#dd4f44');
-      expect(core?.getAttribute('d')).toContain('Q');
-      expect(document.querySelector('.laser-trail-tip')).not.toBeNull();
+      const stroke = document.querySelector<SVGPathElement>(
+        '.laser-trail-stroke',
+      );
+      expect(stroke).not.toBeNull();
+      expect(stroke).toHaveAttribute('stroke', '#dd4f44');
+      expect(stroke).toHaveAttribute(
+        'stroke-width',
+        String(LASER_TRAIL_STROKE_WIDTH_PX),
+      );
+      expect(stroke).toHaveAttribute('vector-effect', 'non-scaling-stroke');
+      expect(stroke?.getAttribute('d')).toContain('Q');
+      expect(document.querySelectorAll('.laser-trail-stroke')).toHaveLength(1);
+      expect(document.querySelector('.laser-trail-mask-band')).not.toBeNull();
+      expect(
+        document.querySelector(
+          '.laser-trail-tip, .laser-trail-run, .laser-trail-glow, .laser-trail-core',
+        ),
+      ).toBeNull();
+      expect(document.querySelector('.laser-trail circle')).toBeNull();
 
       drawPointerEvent(surface, 'up', { x: 500, y: 300 }, 1, pointerType);
       expect(document.querySelector('.laser-trail')).not.toBeNull();
       expect(document.querySelector('.completed-ink-layer')).toBeNull();
     },
   );
+
+  it('accumulates tiny stylus movements into a continuous trail', () => {
+    render(<BoardApp />);
+    activateTool('Laser pointer');
+    const surface = activeDrawingSurface();
+
+    drawPointerEvent(surface, 'down', { x: 100, y: 100 }, 2, 'pen');
+    for (let x = 101; x <= 180; x += 1) {
+      drawPointerEvent(surface, 'move', { x, y: 100 }, 2, 'pen');
+    }
+
+    const pathData = document
+      .querySelector<SVGPathElement>('.laser-trail-stroke')
+      ?.getAttribute('d');
+    expect(pathData).toContain('M 100 100');
+    expect(pathData).toContain('180 100');
+    expect(pathData).toContain('Q');
+  });
 
   it('evaporates from the oldest end and fully disappears three seconds after release', () => {
     render(<BoardApp />);
@@ -181,25 +218,27 @@ describe('BoardApp laser pointer', () => {
     drawPointerEvent(surface, 'move', { x: 300, y: 200 });
     setClock(2200);
     drawPointerEvent(surface, 'move', { x: 500, y: 300 });
-    expect(document.querySelector('.laser-trail-core')?.getAttribute('d')).toContain(
-      '100 100',
-    );
+    expect(
+      document.querySelector('.laser-trail-stroke')?.getAttribute('d'),
+    ).toContain('100 100');
 
     runAnimationFrame(3101);
-    const remainingPath = Array.from(
-      document.querySelectorAll<SVGPathElement>('.laser-trail-core'),
-    )
-      .map((path) => path.getAttribute('d'))
-      .join(' ');
+    const remainingPath = document
+      .querySelector<SVGPathElement>('.laser-trail-stroke')
+      ?.getAttribute('d');
     expect(remainingPath).not.toContain('100 100');
     expect(remainingPath).toContain('300 200');
     expect(remainingPath).toContain('500 300');
 
     drawPointerEvent(surface, 'up', { x: 500, y: 300 });
     runAnimationFrame(5601);
-    const fadingTip = document.querySelector('.laser-trail-tip');
-    expect(fadingTip).not.toBeNull();
-    expect(Number(fadingTip?.getAttribute('opacity'))).toBeLessThan(1);
+    const fadingBands = Array.from(
+      document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
+    );
+    expect(fadingBands.length).toBeGreaterThan(1);
+    expect(
+      Math.max(...fadingBands.map((band) => Number(band.getAttribute('opacity')))),
+    ).toBeLessThan(1);
 
     runAnimationFrame(3101 + LASER_TRAIL_LIFETIME_MS + 1);
     expect(document.querySelector('.laser-trail')).toBeNull();
@@ -213,7 +252,7 @@ describe('BoardApp laser pointer', () => {
 
     drawPointerEvent(surface, 'down', { x: 240, y: 180 }, 3);
     runAnimationFrame(LASER_TRAIL_LIFETIME_MS + 500);
-    expect(document.querySelector('.laser-trail-tip')).not.toBeNull();
+    expect(document.querySelector('.laser-trail-stroke')).not.toBeNull();
     expect(capturedPointers.has(3)).toBe(true);
 
     fireEvent(window, new Event('blur'));
@@ -297,12 +336,138 @@ describe('BoardApp laser pointer', () => {
     expect(releasePointerCapture).toHaveBeenCalledWith(7);
     expect(animationFrames.size).toBe(0);
   });
+
+  it('starts a smooth tail as soon as the shared pointer-juice budget fills', () => {
+    render(<BoardApp />);
+    activateTool('Laser pointer');
+    const surface = activeDrawingSurface();
+
+    drawPointerEvent(surface, 'down', { x: 100, y: 100 });
+    drawPointerEvent(surface, 'move', { x: 1500, y: 100 });
+
+    const stroke = document.querySelector<SVGPathElement>(
+      '.laser-trail-stroke',
+    );
+    const firstX = Number(
+      stroke?.getAttribute('d')?.match(/^M ([\d.]+)/)?.[1],
+    );
+    expect(firstX).toBeCloseTo(1500 - LASER_TRAIL_MAX_LENGTH);
+    expect(document.querySelectorAll('.laser-trail-stroke')).toHaveLength(1);
+
+    const opacities = Array.from(
+      document.querySelectorAll<SVGGElement>('.laser-trail-mask-band'),
+    ).map((band) => Number(band.getAttribute('opacity')));
+    expect(opacities.length).toBeGreaterThan(20);
+    expect(opacities.length).toBeLessThanOrEqual(97);
+    expect(Math.min(...opacities)).toBeLessThan(0.1);
+    expect(Math.max(...opacities)).toBe(1);
+    expect(
+      opacities.every(
+        (opacity, index) => index === 0 || opacity >= opacities[index - 1],
+      ),
+    ).toBe(true);
+    expect(
+      opacities.every(
+        (opacity, index) =>
+          index === 0 || opacity - opacities[index - 1] <= 1 / 96 + 0.0001,
+      ),
+    ).toBe(true);
+    expect(
+      Array.from(
+        document.querySelectorAll('.laser-trail-mask-segment'),
+      ).every((segment) => segment.getAttribute('stroke-linecap') === 'butt'),
+    ).toBe(true);
+  });
 });
 
-describe('laser trail timing', () => {
+describe('laser trail evaporation', () => {
   it('stays solid before fading and reaches zero at three seconds', () => {
-    expect(laserTrailOpacity(0, 2100)).toBe(1);
-    expect(laserTrailOpacity(0, 2550)).toBeCloseTo(0.5);
+    expect(laserTrailOpacity(0, 1800)).toBe(1);
+    expect(laserTrailOpacity(0, 2400)).toBeCloseTo(0.5);
     expect(laserTrailOpacity(0, LASER_TRAIL_LIFETIME_MS)).toBe(0);
+  });
+
+  it('grows a smooth spatial fade only after the solid budget is used', () => {
+    expect(laserTrailJuiceOpacity(80, 80, 100, 20)).toBe(1);
+    expect(laserTrailJuiceOpacity(80, 90, 100, 20)).toBe(1);
+    expect(laserTrailJuiceOpacity(85, 90, 100, 20)).toBeCloseTo(0.5);
+    expect(laserTrailJuiceOpacity(90, 90, 100, 20)).toBe(0);
+    expect(laserTrailJuiceOpacity(90, 100, 100, 20)).toBeCloseTo(0.5);
+    expect(laserTrailJuiceOpacity(100, 100, 100, 20)).toBe(0);
+  });
+
+  it('interpolates the exact global cutoff regardless of sample density', () => {
+    const newerTrail = {
+      id: 'newer',
+      points: [
+        { x: 0, y: 20, createdAt: 1 },
+        { x: 80, y: 20, createdAt: 1 },
+      ],
+    };
+    const sparse = trimLaserTrailsToLength(
+      [
+        {
+          id: 'older',
+          points: [
+            { x: 0, y: 0, createdAt: 0 },
+            { x: 80, y: 0, createdAt: 0 },
+          ],
+        },
+        newerTrail,
+      ],
+      100,
+    );
+    const dense = trimLaserTrailsToLength(
+      [
+        {
+          id: 'older',
+          points: [0, 20, 40, 60, 80].map((x) => ({
+            x,
+            y: 0,
+            createdAt: 0,
+          })),
+        },
+        newerTrail,
+      ],
+      100,
+    );
+
+    expect(sparse).toHaveLength(2);
+    expect(dense).toHaveLength(2);
+    expect(sparse[0].points[0].x).toBeCloseTo(60);
+    expect(dense[0].points[0].x).toBeCloseTo(60);
+    expect(sparse[0].points.at(-1)?.x).toBe(80);
+    expect(dense[0].points.at(-1)?.x).toBe(80);
+  });
+
+  it('never exceeds the global budget at a very short cutoff', () => {
+    const trails = trimLaserTrailsToLength(
+      [
+        {
+          id: 'older',
+          points: [
+            { x: 0, y: 0, createdAt: 0 },
+            { x: 100, y: 0, createdAt: 0 },
+          ],
+        },
+        {
+          id: 'newer',
+          points: [
+            { x: 0, y: 20, createdAt: 1 },
+            { x: 98, y: 20, createdAt: 1 },
+          ],
+        },
+      ],
+      100,
+    );
+
+    expect(trails).toHaveLength(2);
+    expect(trails[0].points[0].x).toBeCloseTo(98);
+    expect(
+      trails.reduce(
+        (total, trail) => total + laserTrailBudgetLength(trail.points),
+        0,
+      ),
+    ).toBeCloseTo(100);
   });
 });
