@@ -33,9 +33,11 @@ yarn-error.log*
 # deployment and generated files
 .vercel
 /dist/
+/app/dist/
 /.next/
 /.vinext/
 /.wrangler/
+/app/.wrangler/
 next-env.d.ts
 /outputs/
 /work/

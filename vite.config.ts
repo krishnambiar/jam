@@ -8,6 +8,9 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === 'seatbelt';
 export default defineConfig({
   root: 'app',
   publicDir: '../public',
+  define: {
+    'import.meta.env.VITE_BACKGROUND_REMOVAL_ENABLED': JSON.stringify('true'),
+  },
   build: {
     emptyOutDir: true,
     outDir: '../dist',

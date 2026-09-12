@@ -1,13 +1,22 @@
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
+  BringToFront,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  Copy,
+  CopyPlus,
+  ImageOff,
   MoreVertical,
+  PaintBucket,
   Plus,
   Redo2,
   RotateCcw,
   RotateCw,
+  SendToBack,
   Trash2,
   Undo2,
   UserRound,
@@ -20,11 +29,32 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 
+import { DrawingMenu } from './components/DrawingMenu';
+import {
+  InkStrokePath,
+  type InkStrokeHandle,
+} from './components/InkStroke';
+import {
+  LaserTrailLayer,
+  type LaserTrailHandle,
+} from './components/LaserTrail';
 import { SlidePreview } from './components/SlidePreview';
+import { ShapeContent } from './components/ShapeContent';
+import { ShapeMenu } from './components/ShapeMenu';
+import { StickyNoteContent } from './components/StickyNoteContent';
+import { TextBoxContent } from './components/TextBoxContent';
 import { ToolButton } from './components/ToolButton';
+import {
+  BACKGROUND_REMOVAL_ENABLED,
+  BackgroundRemovalError,
+  activeImageSource,
+  getBackgroundRemovalErrorMessage,
+  removeImageBackground,
+} from './backgroundRemoval';
 import {
   BOARD_HEIGHT,
   BOARD_WIDTH,
@@ -32,33 +62,431 @@ import {
   HISTORY_LIMIT,
   INITIAL_SLIDE_ID,
   MAX_SLIDES,
+  MIN_SHAPE_DRAW_SIZE,
+  STICKY_NOTE_SIZE,
+  TEXT_BOX_DEFAULT_WIDTH,
+  TEXT_BOX_MIN_HEIGHT,
+  TEXT_BOX_MIN_WIDTH,
   createEmptySlide,
+  getStickyNoteColorValue,
+  getShapeColorValue,
+  getShapeOption,
   resizeCorners,
+  shapeColors,
+  stickyNoteColors,
+  textBoxColors,
+  textBoxStyles,
   tools,
 } from './constants';
 import type {
   BoardRect,
   CanvasImage,
+  CanvasItem,
+  CanvasShape,
+  CanvasStickyNote,
+  CanvasStroke,
+  CanvasTextBox,
   DeckHistoryState,
+  DrawingColor,
+  DrawingStyle,
+  EraserPoint,
+  EraserTrace,
   Gesture,
   HistoryState,
+  LaserPoint,
+  Point,
   ResizeCorner,
+  ResizeSide,
+  ShapeColor,
+  ShapeType,
   SlideDeck,
+  StrokePoint,
+  StickyNoteColor,
+  TextBoxAlignment,
+  TextBoxColor,
+  TextBoxStyle,
+  Tool,
+  TransformableCanvasItem,
 } from './types';
 import {
   addDeckToPast,
   addToPast,
+  applyEraserTraceToItems,
+  appendStrokePoints,
   boardPoint,
   clamp,
   decodeImageFile,
+  eraserRadiusForVelocity,
   fittedImageSize,
+  getInkRuns,
   isTextEntry,
   normalizeRotation,
-  resizedImage,
+  resizedItem,
+  resizedItemWidth,
+  rotatedItemExtents,
+  type EraserSweep,
 } from './utils';
 
+type StickyNoteEdit = {
+  itemId: string;
+  slideId: string;
+  draft: string;
+  isNew: boolean;
+};
+
+type PendingStickyNote = {
+  note: CanvasStickyNote;
+  slideId: string;
+  discarding: boolean;
+};
+
+type TextBoxEdit = {
+  itemId: string;
+  slideId: string;
+  draft: string;
+  height: number;
+  isNew: boolean;
+};
+
+type PendingTextBox = {
+  box: CanvasTextBox;
+  slideId: string;
+};
+
+type InkGesture = {
+  pointerId: number;
+  slideId: string;
+  boardRect: BoardRect;
+  stroke: CanvasStroke;
+  lastSample: Point & { time: number };
+  velocity: number | null;
+};
+
+type LaserGesture = {
+  pointerId: number;
+  boardRect: BoardRect;
+  trailId: string;
+};
+
+type EraserGesture = {
+  pointerId: number;
+  slideId: string;
+  boardRect: BoardRect;
+  initialItems: CanvasItem[];
+  workingItems: CanvasItem[];
+  trace: EraserTrace;
+  sweeps: EraserSweep[];
+  lastSample: EraserPoint & { time: number };
+  velocity: number | null;
+};
+
+type PendingErase = {
+  slideId: string;
+  items: CanvasItem[];
+};
+
+type ShapeGesture = {
+  pointerId: number;
+  slideId: string;
+  boardRect: BoardRect;
+  startPoint: Point;
+  shape: CanvasShape;
+};
+
+type PendingShape = {
+  slideId: string;
+  shape: CanvasShape;
+};
+
+type BackgroundRemovalJob = {
+  key: string;
+  slideId: string;
+  itemId: string;
+  originalSrc: string;
+  requestToken: string;
+  controller: AbortController;
+  processedSrc?: string;
+};
+
+const ITEM_CLIPBOARD_TYPE = 'application/x-untitled-jam-item';
+const MAX_CUSTOM_CLIPBOARD_SOURCE_CHARACTERS = 8 * 1024 * 1024;
+
+function backgroundRemovalJobKey(slideId: string, itemId: string) {
+  return JSON.stringify([slideId, itemId]);
+}
+
+function clipboardLabel(item: TransformableCanvasItem) {
+  if (item.kind === 'shape') {
+    return `Untitled Jam ${getShapeOption(item.shape).label} shape`;
+  }
+  if (item.kind === 'sticky-note') return 'Untitled Jam sticky note';
+  if (item.kind === 'text-box') return `Untitled Jam text: ${item.text}`;
+  return `Untitled Jam image: ${item.name}`;
+}
+
+function isClipboardItem(value: unknown): value is TransformableCanvasItem {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Record<string, unknown>;
+  const hasTransform =
+    typeof item.id === 'string' &&
+    typeof item.x === 'number' &&
+    typeof item.y === 'number' &&
+    typeof item.width === 'number' &&
+    typeof item.height === 'number' &&
+    typeof item.rotation === 'number';
+  if (!hasTransform) return false;
+
+  if (item.kind === 'shape') {
+    return (
+      shapeColors.some((color) => color.id === item.color) &&
+      getShapeOption(item.shape as ShapeType).id === item.shape &&
+      (item.arrowDirection === undefined ||
+        item.arrowDirection === 'left' ||
+        item.arrowDirection === 'right') &&
+      (item.filled === undefined || typeof item.filled === 'boolean')
+    );
+  }
+  if (item.kind === 'sticky-note') {
+    return (
+      typeof item.text === 'string' &&
+      stickyNoteColors.some((color) => color.id === item.color)
+    );
+  }
+  if (item.kind === 'text-box') {
+    return (
+      typeof item.text === 'string' &&
+      textBoxStyles.some((style) => style.id === item.style) &&
+      textBoxColors.some((color) => color.id === item.color) &&
+      (item.alignment === 'left' ||
+        item.alignment === 'center' ||
+        item.alignment === 'right') &&
+      typeof item.scale === 'number' &&
+      Number.isFinite(item.scale) &&
+      item.scale > 0
+    );
+  }
+  return (
+    item.kind === 'image' &&
+    typeof item.src === 'string' &&
+    typeof item.name === 'string' &&
+    (item.backgroundRemovedSrc === undefined ||
+      typeof item.backgroundRemovedSrc === 'string') &&
+    (item.backgroundRemoved === undefined ||
+      typeof item.backgroundRemoved === 'boolean') &&
+    (item.backgroundRemoved !== true ||
+      (typeof item.backgroundRemovedSrc === 'string' &&
+        item.backgroundRemovedSrc.length > 0))
+  );
+}
+
+function textBoxWithHeight(box: CanvasTextBox, height: number) {
+  const nextHeight = Math.max(TEXT_BOX_MIN_HEIGHT * box.scale, height);
+  if (Math.abs(nextHeight - box.height) < 0.1) return box;
+  const offset = (nextHeight - box.height) / 2;
+  const radians = (box.rotation * Math.PI) / 180;
+  const anchoredBox = {
+    ...box,
+    x: box.x - Math.sin(radians) * offset,
+    y: box.y + Math.cos(radians) * offset,
+    height: nextHeight,
+  };
+  const extents = rotatedItemExtents(anchoredBox);
+
+  return {
+    ...anchoredBox,
+    x: clamp(
+      anchoredBox.x,
+      extents.horizontal,
+      BOARD_WIDTH - extents.horizontal,
+    ),
+    y: clamp(
+      anchoredBox.y,
+      extents.vertical,
+      BOARD_HEIGHT - extents.vertical,
+    ),
+  };
+}
+
+function moveColorChoiceFocus(event: ReactKeyboardEvent<HTMLButtonElement>) {
+  const direction =
+    event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+      ? -1
+      : event.key === 'ArrowRight' || event.key === 'ArrowDown'
+        ? 1
+        : 0;
+  const group = event.currentTarget.closest('[role="radiogroup"]');
+  const choices = Array.from(
+    group?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ?? [],
+  );
+  let nextIndex = choices.indexOf(event.currentTarget);
+
+  if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = choices.length - 1;
+  else if (direction !== 0 && choices.length > 0) {
+    nextIndex = (nextIndex + direction + choices.length) % choices.length;
+  } else {
+    return null;
+  }
+
+  event.preventDefault();
+  const nextChoice = choices[nextIndex] ?? null;
+  nextChoice?.focus();
+  return nextChoice;
+}
+
+function itemMenuChoices(menu: HTMLElement) {
+  return Array.from(
+    menu.querySelectorAll<HTMLButtonElement>(
+      '[role="menuitem"]:not(:disabled)',
+    ),
+  );
+}
+
+function setItemMenuTabStop(menu: HTMLElement, choice: HTMLButtonElement) {
+  itemMenuChoices(menu).forEach((candidate) => {
+    candidate.tabIndex = candidate === choice ? 0 : -1;
+  });
+}
+
+function moveItemMenuFocus(event: ReactKeyboardEvent<HTMLDivElement>) {
+  const direction =
+    event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
+  const choices = itemMenuChoices(event.currentTarget);
+  let nextIndex = choices.findIndex((choice) => choice === document.activeElement);
+
+  if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = choices.length - 1;
+  else if (direction !== 0 && choices.length > 0) {
+    const startIndex =
+      nextIndex < 0 ? (direction > 0 ? -1 : 0) : nextIndex;
+    nextIndex = (startIndex + direction + choices.length) % choices.length;
+  } else {
+    return;
+  }
+
+  event.preventDefault();
+  const choice = choices[nextIndex];
+  if (!choice) return;
+  setItemMenuTabStop(event.currentTarget, choice);
+  choice.focus();
+}
+
+function bringItemToFront(items: CanvasItem[], itemId: string) {
+  const itemIndex = items.findIndex((item) => item.id === itemId);
+  if (itemIndex < 0 || itemIndex === items.length - 1) return items;
+
+  return [
+    ...items.slice(0, itemIndex),
+    ...items.slice(itemIndex + 1),
+    items[itemIndex],
+  ];
+}
+
+function moveItemInLayer(
+  items: CanvasItem[],
+  itemId: string,
+  direction: -1 | 1,
+) {
+  const itemIndex = items.findIndex((item) => item.id === itemId);
+  const targetIndex = itemIndex + direction;
+  if (itemIndex < 0 || targetIndex < 0 || targetIndex >= items.length) {
+    return items;
+  }
+
+  const next = [...items];
+  [next[itemIndex], next[targetIndex]] = [next[targetIndex], next[itemIndex]];
+  return next;
+}
+
+function restoreGestureStart(items: CanvasItem[], gesture: Gesture) {
+  const itemIndex = items.findIndex((item) => item.id === gesture.itemId);
+  if (itemIndex < 0) return items;
+
+  const withoutItem = [
+    ...items.slice(0, itemIndex),
+    ...items.slice(itemIndex + 1),
+  ];
+  const restoredIndex = Math.min(gesture.initialIndex, withoutItem.length);
+
+  return [
+    ...withoutItem.slice(0, restoredIndex),
+    gesture.initialItem,
+    ...withoutItem.slice(restoredIndex),
+  ];
+}
+
+function eraserRadiusInBoardUnits(
+  boardRect: BoardRect,
+  velocity: number,
+) {
+  const horizontalScale = boardRect.width / BOARD_WIDTH;
+  const verticalScale = boardRect.height / BOARD_HEIGHT;
+  const screenScale = Math.max(
+    0.001,
+    (horizontalScale + verticalScale) / 2,
+  );
+  return eraserRadiusForVelocity(velocity) / screenScale;
+}
+
+function copiedItemPosition(
+  source: TransformableCanvasItem,
+  items: CanvasItem[],
+) {
+  const extents = rotatedItemExtents(source);
+  const directions = [
+    [1, 1],
+    [-1, 1],
+    [1, -1],
+    [-1, -1],
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const;
+
+  for (let step = 1; step <= 8; step += 1) {
+    for (const [horizontal, vertical] of directions) {
+      const x = clamp(
+        source.x + horizontal * step * 32,
+        extents.horizontal,
+        BOARD_WIDTH - extents.horizontal,
+      );
+      const y = clamp(
+        source.y + vertical * step * 32,
+        extents.vertical,
+        BOARD_HEIGHT - extents.vertical,
+      );
+      if (Math.abs(x - source.x) < 0.5 && Math.abs(y - source.y) < 0.5) {
+        continue;
+      }
+
+      const occupied = items.some(
+        (item) =>
+          item.kind !== 'stroke' &&
+          Math.abs(item.x - x) < 0.5 &&
+          Math.abs(item.y - y) < 0.5,
+      );
+      if (!occupied) return { x, y };
+    }
+  }
+
+  return { x: source.x, y: source.y };
+}
+
 export default function BoardApp() {
-  const [selectedTool, setSelectedTool] = useState(2);
+  const [selectedToolId, setSelectedToolId] = useState<Tool['id']>('select');
+  const [drawingStyle, setDrawingStyle] = useState<DrawingStyle>('pen');
+  const [drawingColor, setDrawingColor] = useState<DrawingColor>('charcoal');
+  const [isDrawingMenuOpen, setIsDrawingMenuOpen] = useState(false);
+  const [activeShape, setActiveShape] = useState<ShapeType>('circle');
+  const [activeShapeColor, setActiveShapeColor] =
+    useState<ShapeColor>('charcoal');
+  const [isShapeMenuOpen, setIsShapeMenuOpen] = useState(false);
+  const [focusShapeMenuSelection, setFocusShapeMenuSelection] = useState(false);
+  const [pendingStroke, setPendingStroke] = useState<CanvasStroke | null>(null);
+  const [pendingShape, setPendingShape] = useState<PendingShape | null>(null);
+  const [pendingErase, setPendingErase] = useState<PendingErase | null>(null);
+  const [eraserPreview, setEraserPreview] = useState<EraserPoint | null>(null);
   const [deckHistory, setDeckHistory] = useState<DeckHistoryState>(() => ({
     past: [],
     present: {
@@ -73,19 +501,146 @@ export default function BoardApp() {
     left: false,
     right: false,
   });
-  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
-  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [openItemMenuId, setOpenItemMenuId] = useState<string | null>(null);
+  const [openColorPickerId, setOpenColorPickerId] = useState<string | null>(null);
+  const [stickyNoteEdit, setStickyNoteEdit] = useState<StickyNoteEdit | null>(
+    null,
+  );
+  const [pendingStickyNote, setPendingStickyNote] =
+    useState<PendingStickyNote | null>(null);
+  const [textBoxEdit, setTextBoxEdit] = useState<TextBoxEdit | null>(null);
+  const [pendingTextBox, setPendingTextBox] =
+    useState<PendingTextBox | null>(null);
   const [openSlideMenuId, setOpenSlideMenuId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [backgroundRemovalJobKeys, setBackgroundRemovalJobKeys] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const boardRef = useRef<HTMLDivElement>(null);
   const overviewViewportRef = useRef<HTMLDivElement>(null);
   const activeThumbnailRef = useRef<HTMLButtonElement>(null);
   const slideMenuButtonRef = useRef<HTMLButtonElement>(null);
   const frameCounterRef = useRef<HTMLButtonElement>(null);
+  const penToolButtonRef = useRef<HTMLButtonElement>(null);
+  const shapeToolButtonRef = useRef<HTMLButtonElement>(null);
+  const drawingSurfaceRef = useRef<HTMLDivElement>(null);
+  const activeInkRendererRef = useRef<InkStrokeHandle>(null);
+  const activeLaserRendererRef = useRef<LaserTrailHandle>(null);
+  const inkRenderFrameRef = useRef<number | null>(null);
+  const activeColorChoiceRef = useRef<HTMLButtonElement>(null);
+  const focusColorPickerOnOpenRef = useRef(false);
+  const focusItemMenuOnOpenRef = useRef(false);
+  const finishingStickyNoteIdRef = useRef<string | null>(null);
+  const finishingTextBoxIdRef = useRef<string | null>(null);
+  const stickyNoteDiscardTimersRef = useRef<number[]>([]);
   const gestureRef = useRef<Gesture | null>(null);
+  const backgroundRemovalJobsRef = useRef<Map<string, BackgroundRemovalJob>>(
+    new Map(),
+  );
+  const itemFrameRefsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const itemMenuButtonRefsRef = useRef<Map<string, HTMLButtonElement>>(
+    new Map(),
+  );
+  const inkGestureRef = useRef<InkGesture | null>(null);
+  const laserGestureRef = useRef<LaserGesture | null>(null);
+  const eraserGestureRef = useRef<EraserGesture | null>(null);
+  const shapeGestureRef = useRef<ShapeGesture | null>(null);
+  const copiedItemRef = useRef<TransformableCanvasItem | null>(null);
+  const copiedItemLabelRef = useRef<string | null>(null);
+  const copiedItemInternalOnlyRef = useRef(false);
+  const copyEventHandledRef = useRef(false);
   const activeSlideIdRef = useRef(deck.activeSlideId);
+  const deckRef = useRef(deck);
   const wasSlideOverviewOpenRef = useRef(false);
   const overviewReturnFocusRef = useRef<'counter' | 'canvas'>('counter');
+
+  const closeDrawingMenu = useCallback((restoreFocus = false) => {
+    setIsDrawingMenuOpen(false);
+    if (!restoreFocus) return;
+
+    window.requestAnimationFrame(() => {
+      penToolButtonRef.current?.focus({ preventScroll: true });
+    });
+  }, []);
+
+  const closeShapeMenu = useCallback((restoreFocus = false) => {
+    setIsShapeMenuOpen(false);
+    if (!restoreFocus) return;
+
+    window.requestAnimationFrame(() => {
+      shapeToolButtonRef.current?.focus({ preventScroll: true });
+    });
+  }, []);
+
+  const cancelActiveInk = useCallback(() => {
+    const gesture = inkGestureRef.current;
+    inkGestureRef.current = null;
+    setPendingStroke(null);
+    if (inkRenderFrameRef.current !== null) {
+      window.cancelAnimationFrame(inkRenderFrameRef.current);
+      inkRenderFrameRef.current = null;
+    }
+
+    if (
+      gesture &&
+      drawingSurfaceRef.current?.hasPointerCapture(gesture.pointerId)
+    ) {
+      drawingSurfaceRef.current.releasePointerCapture(gesture.pointerId);
+    }
+  }, []);
+
+  const cancelActiveLaserPointer = useCallback(() => {
+    const gesture = laserGestureRef.current;
+    laserGestureRef.current = null;
+    activeLaserRendererRef.current?.clear();
+
+    if (
+      gesture &&
+      drawingSurfaceRef.current?.hasPointerCapture(gesture.pointerId)
+    ) {
+      drawingSurfaceRef.current.releasePointerCapture(gesture.pointerId);
+    }
+  }, []);
+
+  const cancelActiveEraser = useCallback(() => {
+    const gesture = eraserGestureRef.current;
+    eraserGestureRef.current = null;
+    setPendingErase(null);
+    setEraserPreview(null);
+
+    if (
+      gesture &&
+      drawingSurfaceRef.current?.hasPointerCapture(gesture.pointerId)
+    ) {
+      drawingSurfaceRef.current.releasePointerCapture(gesture.pointerId);
+    }
+  }, []);
+
+  const cancelActiveShape = useCallback(() => {
+    const gesture = shapeGestureRef.current;
+    shapeGestureRef.current = null;
+    setPendingShape(null);
+
+    if (
+      gesture &&
+      drawingSurfaceRef.current?.hasPointerCapture(gesture.pointerId)
+    ) {
+      drawingSurfaceRef.current.releasePointerCapture(gesture.pointerId);
+    }
+  }, []);
+
+  const cancelActiveMarking = useCallback(() => {
+    cancelActiveInk();
+    cancelActiveLaserPointer();
+    cancelActiveEraser();
+    cancelActiveShape();
+  }, [
+    cancelActiveEraser,
+    cancelActiveInk,
+    cancelActiveLaserPointer,
+    cancelActiveShape,
+  ]);
 
   const closeSlideMenu = useCallback((restoreFocus = false) => {
     setOpenSlideMenuId(null);
@@ -114,7 +669,8 @@ export default function BoardApp() {
 
   useLayoutEffect(() => {
     activeSlideIdRef.current = deck.activeSlideId;
-  }, [deck.activeSlideId]);
+    deckRef.current = deck;
+  }, [deck]);
 
   const activeSlideIndex = Math.max(
     0,
@@ -122,6 +678,135 @@ export default function BoardApp() {
   );
   const activeSlide = deck.slides[activeSlideIndex];
   const history = activeSlide?.history ?? EMPTY_HISTORY;
+
+  const focusItemFrame = useCallback((itemId: string) => {
+    window.requestAnimationFrame(() => {
+      itemFrameRefsRef.current.get(itemId)?.focus({ preventScroll: true });
+    });
+  }, []);
+
+  const removeTrackedBackgroundRemovalJob = useCallback(
+    (job: BackgroundRemovalJob, abort = false) => {
+      if (backgroundRemovalJobsRef.current.get(job.key) !== job) return false;
+      if (abort) job.controller.abort();
+      backgroundRemovalJobsRef.current.delete(job.key);
+      setBackgroundRemovalJobKeys((current) => {
+        if (!current.has(job.key)) return current;
+        const next = new Set(current);
+        next.delete(job.key);
+        return next;
+      });
+      return true;
+    },
+    [],
+  );
+
+  const cancelBackgroundRemovalJob = useCallback(
+    (slideId: string, itemId: string) => {
+      const job = backgroundRemovalJobsRef.current.get(
+        backgroundRemovalJobKey(slideId, itemId),
+      );
+      if (job) removeTrackedBackgroundRemovalJob(job, true);
+    },
+    [removeTrackedBackgroundRemovalJob],
+  );
+
+  const cancelBackgroundRemovalJobsForSlide = useCallback(
+    (slideId: string) => {
+      Array.from(backgroundRemovalJobsRef.current.values()).forEach((job) => {
+        if (job.slideId === slideId) {
+          removeTrackedBackgroundRemovalJob(job, true);
+        }
+      });
+    },
+    [removeTrackedBackgroundRemovalJob],
+  );
+
+  const cancelAllBackgroundRemovalJobs = useCallback(() => {
+    Array.from(backgroundRemovalJobsRef.current.values()).forEach((job) => {
+      removeTrackedBackgroundRemovalJob(job, true);
+    });
+  }, [removeTrackedBackgroundRemovalJob]);
+
+  const applyCompletedBackgroundRemoval = useCallback(
+    (job: BackgroundRemovalJob) => {
+      if (!job.processedSrc) return;
+      if (backgroundRemovalJobsRef.current.get(job.key) !== job) return;
+
+      const targetSlide = deckRef.current.slides.find(
+        (slide) => slide.id === job.slideId,
+      );
+      const targetImage = targetSlide?.history.present.find(
+        (item): item is CanvasImage =>
+          item.id === job.itemId && item.kind === 'image',
+      );
+      if (!targetImage || targetImage.src !== job.originalSrc) {
+        removeTrackedBackgroundRemovalJob(job, true);
+        return;
+      }
+
+      const processedSrc = job.processedSrc;
+      const slideNumber =
+        deckRef.current.slides.findIndex((slide) => slide.id === job.slideId) +
+        1;
+      removeTrackedBackgroundRemovalJob(job);
+      setDeckHistory((current) => {
+        const slideIndex = current.present.slides.findIndex(
+          (slide) => slide.id === job.slideId,
+        );
+        if (slideIndex < 0) return current;
+
+        const slide = current.present.slides[slideIndex];
+        const imageIndex = slide.history.present.findIndex(
+          (item) =>
+            item.id === job.itemId &&
+            item.kind === 'image' &&
+            item.src === job.originalSrc,
+        );
+        if (imageIndex < 0) return current;
+
+        const image = slide.history.present[imageIndex] as CanvasImage;
+        const present = [...slide.history.present];
+        present[imageIndex] = {
+          ...image,
+          backgroundRemovedSrc: processedSrc,
+          backgroundRemoved: true,
+        };
+        const slides = [...current.present.slides];
+        slides[slideIndex] = {
+          ...slide,
+          history: {
+            past: addToPast(slide.history.past, slide.history.present),
+            present,
+            future: [],
+          },
+        };
+
+        return {
+          past: addDeckToPast(current.past, current.present),
+          present: { ...current.present, slides },
+          future: [],
+        };
+      });
+      setNotice(
+        activeSlideIdRef.current === job.slideId || slideNumber < 1
+          ? 'Background removed.'
+          : `Background removed on slide ${slideNumber}.`,
+      );
+    },
+    [removeTrackedBackgroundRemovalJob],
+  );
+
+  const flushCompletedBackgroundRemovals = useCallback(() => {
+    if (gestureRef.current || eraserGestureRef.current) return;
+    Array.from(backgroundRemovalJobsRef.current.values()).forEach((job) => {
+      if (job.processedSrc) applyCompletedBackgroundRemoval(job);
+    });
+  }, [applyCompletedBackgroundRemoval]);
+
+  useEffect(() => {
+    if (!pendingErase) flushCompletedBackgroundRemovals();
+  }, [flushCompletedBackgroundRemovals, pendingErase]);
 
   const updateActiveHistory = useCallback(
     (update: (history: HistoryState) => HistoryState) => {
@@ -150,7 +835,10 @@ export default function BoardApp() {
   const cancelActiveGesture = useCallback(() => {
     const gesture = gestureRef.current;
     gestureRef.current = null;
-    if (!gesture?.moved) return;
+    if (!gesture || (!gesture.moved && !gesture.broughtToFront)) {
+      flushCompletedBackgroundRemovals();
+      return;
+    }
 
     setDeck((current) => ({
       ...current,
@@ -160,18 +848,20 @@ export default function BoardApp() {
               ...slide,
               history: {
                 ...slide.history,
-                present: slide.history.present.map((image) =>
-                  image.id === gesture.imageId ? gesture.initialImage : image,
+                present: restoreGestureStart(
+                  slide.history.present,
+                  gesture,
                 ),
               },
             }
           : slide,
       ),
     }));
-  }, [setDeck]);
+    flushCompletedBackgroundRemovals();
+  }, [flushCompletedBackgroundRemovals, setDeck]);
 
   const commit = useCallback(
-    (update: (images: CanvasImage[]) => CanvasImage[]) => {
+    (update: (items: CanvasItem[]) => CanvasItem[]) => {
       cancelActiveGesture();
       updateActiveHistory((current) => {
         const next = update(current.present);
@@ -188,10 +878,21 @@ export default function BoardApp() {
   );
 
   const undo = useCallback(() => {
+    if (deckHistory.past.length === 0) return;
+
+    cancelActiveMarking();
+    closeDrawingMenu();
+    closeShapeMenu();
+    cancelAllBackgroundRemovalJobs();
     cancelActiveGesture();
-    setOpenMenuId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+    setStickyNoteEdit(null);
+    setPendingStickyNote(null);
+    setTextBoxEdit(null);
+    setPendingTextBox(null);
     closeSlideMenu(openSlideMenuId !== null);
-    setSelectedImageId(null);
+    setSelectedItemId(null);
     setDeckHistory((current) => {
       const previous = current.past.at(-1);
       if (!previous) return current;
@@ -202,13 +903,33 @@ export default function BoardApp() {
         future: [current.present, ...current.future].slice(0, HISTORY_LIMIT),
       };
     });
-  }, [cancelActiveGesture, closeSlideMenu, openSlideMenuId]);
+  }, [
+    cancelActiveGesture,
+    cancelActiveMarking,
+    cancelAllBackgroundRemovalJobs,
+    closeDrawingMenu,
+    closeShapeMenu,
+    closeSlideMenu,
+    deckHistory.past.length,
+    openSlideMenuId,
+  ]);
 
   const redo = useCallback(() => {
+    if (deckHistory.future.length === 0) return;
+
+    cancelActiveMarking();
+    closeDrawingMenu();
+    closeShapeMenu();
+    cancelAllBackgroundRemovalJobs();
     cancelActiveGesture();
-    setOpenMenuId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+    setStickyNoteEdit(null);
+    setPendingStickyNote(null);
+    setTextBoxEdit(null);
+    setPendingTextBox(null);
     closeSlideMenu(openSlideMenuId !== null);
-    setSelectedImageId(null);
+    setSelectedItemId(null);
     setDeckHistory((current) => {
       const next = current.future[0];
       if (!next) return current;
@@ -219,13 +940,39 @@ export default function BoardApp() {
         future: current.future.slice(1),
       };
     });
-  }, [cancelActiveGesture, closeSlideMenu, openSlideMenuId]);
+  }, [
+    cancelActiveGesture,
+    cancelActiveMarking,
+    cancelAllBackgroundRemovalJobs,
+    closeDrawingMenu,
+    closeShapeMenu,
+    closeSlideMenu,
+    deckHistory.future.length,
+    openSlideMenuId,
+  ]);
 
   const deleteSlide = useCallback(
     (slideId: string) => {
+      const currentDeck = deckRef.current;
+      if (
+        currentDeck.slides.length <= 1 ||
+        !currentDeck.slides.some((slide) => slide.id === slideId)
+      ) {
+        return;
+      }
+
+      cancelActiveMarking();
+      closeDrawingMenu();
+      closeShapeMenu();
+      cancelBackgroundRemovalJobsForSlide(slideId);
       cancelActiveGesture();
-      setSelectedImageId(null);
-      setOpenMenuId(null);
+      setSelectedItemId(null);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setStickyNoteEdit(null);
+      setPendingStickyNote(null);
+      setTextBoxEdit(null);
+      setPendingTextBox(null);
       closeSlideMenu();
       setDeckHistory((current) => {
         if (current.present.slides.length <= 1) return current;
@@ -250,14 +997,29 @@ export default function BoardApp() {
         };
       });
     },
-    [cancelActiveGesture, closeSlideMenu],
+    [
+      cancelActiveGesture,
+      cancelActiveMarking,
+      cancelBackgroundRemovalJobsForSlide,
+      closeDrawingMenu,
+      closeShapeMenu,
+      closeSlideMenu,
+    ],
   );
 
   const navigateToAdjacentSlide = useCallback(
     (direction: -1 | 1) => {
+      cancelActiveMarking();
+      closeDrawingMenu();
+      closeShapeMenu();
       cancelActiveGesture();
-      setSelectedImageId(null);
-      setOpenMenuId(null);
+      setSelectedItemId(null);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setStickyNoteEdit(null);
+      setPendingStickyNote(null);
+      setTextBoxEdit(null);
+      setPendingTextBox(null);
       closeSlideMenu();
       setDeck((current) => {
         const currentIndex = current.slides.findIndex(
@@ -269,41 +1031,803 @@ export default function BoardApp() {
           : current;
       });
     },
-    [cancelActiveGesture, closeSlideMenu, setDeck],
+    [
+      cancelActiveGesture,
+      cancelActiveMarking,
+      closeDrawingMenu,
+      closeShapeMenu,
+      closeSlideMenu,
+      setDeck,
+    ],
   );
 
-  const deleteImage = useCallback(
-    (imageId: string) => {
-      commit((images) => {
-        if (!images.some((image) => image.id === imageId)) return images;
-        return images.filter((image) => image.id !== imageId);
+  const deleteItem = useCallback(
+    (itemId: string) => {
+      cancelBackgroundRemovalJob(activeSlideIdRef.current, itemId);
+      commit((items) => {
+        if (!items.some((item) => item.id === itemId)) return items;
+        return items.filter((item) => item.id !== itemId);
       });
-      setSelectedImageId((current) => (current === imageId ? null : current));
-      setOpenMenuId(null);
+      setSelectedItemId((current) => (current === itemId ? null : current));
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setStickyNoteEdit((current) =>
+        current?.itemId === itemId ? null : current,
+      );
+      setPendingStickyNote((current) =>
+        current?.note.id === itemId ? null : current,
+      );
+      setTextBoxEdit((current) =>
+        current?.itemId === itemId ? null : current,
+      );
+      setPendingTextBox((current) =>
+        current?.box.id === itemId ? null : current,
+      );
     },
-    [commit],
+    [cancelBackgroundRemovalJob, commit],
   );
 
-  const rotateImage = useCallback(
-    (imageId: string, degrees: number) => {
-      commit((images) =>
-        images.map((image) =>
-          image.id === imageId
-            ? { ...image, rotation: normalizeRotation(image.rotation + degrees) }
-            : image,
+  const rotateItem = useCallback(
+    (itemId: string, degrees: number) => {
+      commit((items) =>
+        items.map((item) =>
+          item.id === itemId && item.kind !== 'stroke'
+            ? { ...item, rotation: normalizeRotation(item.rotation + degrees) }
+            : item,
         ),
       );
-      setOpenMenuId(null);
+      setOpenItemMenuId(null);
     },
     [commit],
+  );
+
+  const moveItemLayer = useCallback(
+    (itemId: string, direction: -1 | 1) => {
+      commit((items) => moveItemInLayer(items, itemId, direction));
+      setOpenItemMenuId(null);
+      setNotice(
+        direction > 0
+          ? 'Text box moved forward.'
+          : 'Text box moved backward.',
+      );
+    },
+    [commit],
+  );
+
+  const toggleShapeFill = useCallback(
+    (itemId: string) => {
+      commit((items) =>
+        items.map((item) =>
+          item.id === itemId && item.kind === 'shape'
+            ? { ...item, filled: !(item.filled ?? true) }
+            : item,
+        ),
+      );
+      setOpenItemMenuId(null);
+    },
+    [commit],
+  );
+
+  const toggleImageBackground = useCallback(
+    (item: CanvasImage) => {
+      const slideId = activeSlideIdRef.current;
+      const jobKey = backgroundRemovalJobKey(slideId, item.id);
+      setOpenItemMenuId(null);
+      focusItemFrame(item.id);
+
+      if (item.backgroundRemoved === true && item.backgroundRemovedSrc) {
+        commit((items) =>
+          items.map((candidate) =>
+            candidate.id === item.id && candidate.kind === 'image'
+              ? { ...candidate, backgroundRemoved: false }
+              : candidate,
+          ),
+        );
+        setNotice('Background restored.');
+        return;
+      }
+
+      if (item.backgroundRemovedSrc) {
+        commit((items) =>
+          items.map((candidate) =>
+            candidate.id === item.id && candidate.kind === 'image'
+              ? { ...candidate, backgroundRemoved: true }
+              : candidate,
+          ),
+        );
+        setNotice('Background removed.');
+        return;
+      }
+
+      if (backgroundRemovalJobsRef.current.has(jobKey)) return;
+
+      const job: BackgroundRemovalJob = {
+        key: jobKey,
+        slideId,
+        itemId: item.id,
+        originalSrc: item.src,
+        requestToken: crypto.randomUUID(),
+        controller: new AbortController(),
+      };
+      backgroundRemovalJobsRef.current.set(jobKey, job);
+      setBackgroundRemovalJobKeys((current) => new Set(current).add(jobKey));
+      setNotice('Removing background…');
+
+      void removeImageBackground(item.src, job.controller.signal).then(
+        (processedSrc) => {
+          const currentJob = backgroundRemovalJobsRef.current.get(jobKey);
+          if (
+            currentJob !== job ||
+            currentJob.requestToken !== job.requestToken ||
+            currentJob.originalSrc !== item.src
+          ) {
+            return;
+          }
+
+          job.processedSrc = processedSrc;
+          if (!gestureRef.current && !eraserGestureRef.current) {
+            applyCompletedBackgroundRemoval(job);
+          }
+        },
+        (error: unknown) => {
+          if (backgroundRemovalJobsRef.current.get(jobKey) !== job) return;
+          removeTrackedBackgroundRemovalJob(job);
+          if (
+            error instanceof BackgroundRemovalError &&
+            error.category === 'aborted'
+          ) {
+            return;
+          }
+          const message = getBackgroundRemovalErrorMessage(error);
+          const slideNumber =
+            deckRef.current.slides.findIndex(
+              (slide) => slide.id === job.slideId,
+            ) + 1;
+          setNotice(
+            activeSlideIdRef.current === job.slideId || slideNumber < 1
+              ? message
+              : `Slide ${slideNumber}: ${message}`,
+          );
+        },
+      );
+    },
+    [
+      applyCompletedBackgroundRemoval,
+      commit,
+      focusItemFrame,
+      removeTrackedBackgroundRemovalJob,
+    ],
+  );
+
+  const addCopiedItem = useCallback(
+    (source: TransformableCanvasItem, message: string) => {
+      cancelActiveMarking();
+      closeDrawingMenu();
+      closeShapeMenu();
+      const id = crypto.randomUUID();
+      commit((items) => {
+        const position = copiedItemPosition(source, items);
+        const copy = {
+          ...source,
+          id,
+          ...position,
+        } satisfies TransformableCanvasItem;
+        return [...items, copy];
+      });
+      setSelectedToolId('select');
+      setSelectedItemId(id);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setTextBoxEdit(null);
+      setPendingTextBox(null);
+      setNotice(message);
+    },
+    [cancelActiveMarking, closeDrawingMenu, closeShapeMenu, commit],
+  );
+
+  const duplicateItem = useCallback(
+    (item: TransformableCanvasItem) => {
+      addCopiedItem(
+        item,
+        `${
+          item.kind === 'shape'
+            ? 'Shape'
+            : item.kind === 'text-box'
+              ? 'Text box'
+              : 'Object'
+        } duplicated.`,
+      );
+    },
+    [addCopiedItem],
+  );
+
+  const copyItem = useCallback((item: TransformableCanvasItem) => {
+    const label = clipboardLabel(item);
+    const internalCopy = { ...item } satisfies TransformableCanvasItem;
+    copiedItemRef.current = internalCopy;
+    copiedItemLabelRef.current = label;
+    copiedItemInternalOnlyRef.current = false;
+    setOpenItemMenuId(null);
+    copyEventHandledRef.current = false;
+
+    try {
+      document.execCommand('copy');
+    } catch {
+      // Fall through to the async clipboard or in-board clipboard.
+    }
+    if (copyEventHandledRef.current) return;
+
+    copiedItemInternalOnlyRef.current = true;
+    setNotice(
+      `${
+        item.kind === 'shape'
+          ? 'Shape'
+          : item.kind === 'text-box'
+            ? 'Text box'
+            : 'Object'
+      } copied in this board.`,
+    );
+    if (!navigator.clipboard?.writeText) {
+      return;
+    }
+
+    void navigator.clipboard.writeText(label).then(
+      () => {
+        if (copiedItemRef.current !== internalCopy) return;
+        copiedItemInternalOnlyRef.current = false;
+        setNotice(
+          `${
+            item.kind === 'shape'
+              ? 'Shape'
+              : item.kind === 'text-box'
+                ? 'Text box'
+                : 'Object'
+          } copied.`,
+        );
+      },
+      () => {
+        if (copiedItemRef.current !== internalCopy) return;
+        // The board-local copy remains available while this page stays focused.
+      },
+    );
+  }, []);
+
+  const discardPendingStickyNote = useCallback((itemId: string) => {
+    setSelectedItemId((current) => (current === itemId ? null : current));
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+    setPendingStickyNote((current) =>
+      current?.note.id === itemId ? { ...current, discarding: true } : current,
+    );
+
+    const timeout = window.setTimeout(() => {
+      setPendingStickyNote((current) =>
+        current?.note.id === itemId ? null : current,
+      );
+      stickyNoteDiscardTimersRef.current =
+        stickyNoteDiscardTimersRef.current.filter(
+          (timer) => timer !== timeout,
+        );
+    }, 360);
+    stickyNoteDiscardTimersRef.current.push(timeout);
+  }, []);
+
+  const finishStickyNoteEdit = useCallback(() => {
+    if (!stickyNoteEdit) return;
+    if (finishingStickyNoteIdRef.current === stickyNoteEdit.itemId) return;
+    finishingStickyNoteIdRef.current = stickyNoteEdit.itemId;
+    setStickyNoteEdit(null);
+    window.queueMicrotask(() => {
+      if (finishingStickyNoteIdRef.current === stickyNoteEdit.itemId) {
+        finishingStickyNoteIdRef.current = null;
+      }
+    });
+
+    if (activeSlideIdRef.current !== stickyNoteEdit.slideId) return;
+    if (stickyNoteEdit.isNew) {
+      if (!stickyNoteEdit.draft.trim()) {
+        discardPendingStickyNote(stickyNoteEdit.itemId);
+        return;
+      }
+
+      const pending =
+        pendingStickyNote?.note.id === stickyNoteEdit.itemId
+          ? pendingStickyNote.note
+          : null;
+      if (!pending) return;
+
+      setPendingStickyNote(null);
+      commit((items) => [
+        ...items,
+        { ...pending, text: stickyNoteEdit.draft },
+      ]);
+      return;
+    }
+
+    commit((items) => {
+      const note = items.find((item) => item.id === stickyNoteEdit.itemId);
+      if (
+        !note ||
+        note.kind !== 'sticky-note' ||
+        note.text === stickyNoteEdit.draft
+      ) {
+        return items;
+      }
+
+      return items.map((item) =>
+        item.id === stickyNoteEdit.itemId && item.kind === 'sticky-note'
+          ? { ...item, text: stickyNoteEdit.draft }
+          : item,
+      );
+    });
+  }, [commit, discardPendingStickyNote, pendingStickyNote, stickyNoteEdit]);
+
+  const beginStickyNoteEdit = useCallback(
+    (note: CanvasStickyNote) => {
+      const draft =
+        stickyNoteEdit?.itemId === note.id ? stickyNoteEdit.draft : note.text;
+      finishStickyNoteEdit();
+      cancelActiveGesture();
+      setSelectedItemId(note.id);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setStickyNoteEdit({
+        itemId: note.id,
+        slideId: deck.activeSlideId,
+        draft,
+        isNew: false,
+      });
+    },
+    [
+      cancelActiveGesture,
+      deck.activeSlideId,
+      finishStickyNoteEdit,
+      stickyNoteEdit,
+    ],
+  );
+
+  const placeStickyNote = useCallback((clientX: number, clientY: number) => {
+    if (!boardRef.current) return;
+    finishStickyNoteEdit();
+    cancelActiveGesture();
+    const boardBounds = boardRef.current.getBoundingClientRect();
+    const point = boardPoint(clientX, clientY, {
+      left: boardBounds.left,
+      top: boardBounds.top,
+      width: boardBounds.width,
+      height: boardBounds.height,
+    });
+    const id = crypto.randomUUID();
+    const note = {
+      kind: 'sticky-note',
+      id,
+      text: '',
+      color: 'yellow',
+      x: clamp(
+        point.x,
+        STICKY_NOTE_SIZE / 2,
+        BOARD_WIDTH - STICKY_NOTE_SIZE / 2,
+      ),
+      y: clamp(
+        point.y,
+        STICKY_NOTE_SIZE / 2,
+        BOARD_HEIGHT - STICKY_NOTE_SIZE / 2,
+      ),
+      width: STICKY_NOTE_SIZE,
+      height: STICKY_NOTE_SIZE,
+      rotation: 0,
+    } satisfies CanvasStickyNote;
+
+    setPendingStickyNote({
+      note,
+      slideId: deck.activeSlideId,
+      discarding: false,
+    });
+    setSelectedToolId('select');
+    setSelectedItemId(id);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+    setStickyNoteEdit({
+      itemId: id,
+      slideId: deck.activeSlideId,
+      draft: '',
+      isNew: true,
+    });
+  }, [cancelActiveGesture, deck.activeSlideId, finishStickyNoteEdit]);
+
+  const finishTextBoxEdit = useCallback(() => {
+    if (!textBoxEdit) return;
+    if (finishingTextBoxIdRef.current === textBoxEdit.itemId) return;
+    finishingTextBoxIdRef.current = textBoxEdit.itemId;
+    setTextBoxEdit(null);
+    window.queueMicrotask(() => {
+      if (finishingTextBoxIdRef.current === textBoxEdit.itemId) {
+        finishingTextBoxIdRef.current = null;
+      }
+    });
+
+    if (activeSlideIdRef.current !== textBoxEdit.slideId) return;
+    if (!textBoxEdit.draft.trim()) {
+      setPendingTextBox((current) =>
+        current?.box.id === textBoxEdit.itemId ? null : current,
+      );
+      setSelectedItemId((current) =>
+        current === textBoxEdit.itemId ? null : current,
+      );
+      if (!textBoxEdit.isNew) {
+        commit((items) =>
+          items.filter((item) => item.id !== textBoxEdit.itemId),
+        );
+      }
+      return;
+    }
+
+    if (textBoxEdit.isNew) {
+      const pending =
+        pendingTextBox?.box.id === textBoxEdit.itemId
+          ? pendingTextBox.box
+          : null;
+      if (!pending) return;
+
+      setPendingTextBox(null);
+      commit((items) => [
+        ...items,
+        textBoxWithHeight(
+          { ...pending, text: textBoxEdit.draft },
+          textBoxEdit.height,
+        ),
+      ]);
+      return;
+    }
+
+    commit((items) => {
+      const box = items.find((item) => item.id === textBoxEdit.itemId);
+      if (!box || box.kind !== 'text-box') return items;
+      const nextBox = textBoxWithHeight(
+        { ...box, text: textBoxEdit.draft },
+        textBoxEdit.height,
+      );
+      if (
+        box.text === nextBox.text &&
+        box.height === nextBox.height &&
+        box.x === nextBox.x &&
+        box.y === nextBox.y
+      ) {
+        return items;
+      }
+
+      return items.map((item) =>
+        item.id === box.id ? nextBox : item,
+      );
+    });
+  }, [commit, pendingTextBox, textBoxEdit]);
+
+  const beginTextBoxEdit = useCallback(
+    (box: CanvasTextBox) => {
+      const currentEdit =
+        textBoxEdit?.itemId === box.id ? textBoxEdit : null;
+      const draft = currentEdit?.draft ?? box.text;
+      const height = currentEdit?.height ?? box.height;
+      finishStickyNoteEdit();
+      finishTextBoxEdit();
+      cancelActiveGesture();
+      setSelectedItemId(box.id);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setTextBoxEdit({
+        itemId: box.id,
+        slideId: deck.activeSlideId,
+        draft,
+        height,
+        isNew: false,
+      });
+    },
+    [
+      cancelActiveGesture,
+      deck.activeSlideId,
+      finishStickyNoteEdit,
+      finishTextBoxEdit,
+      textBoxEdit,
+    ],
+  );
+
+  const placeTextBox = useCallback(
+    (clientX: number, clientY: number) => {
+      if (!boardRef.current) return;
+      finishStickyNoteEdit();
+      finishTextBoxEdit();
+      cancelActiveGesture();
+      const boardBounds = boardRef.current.getBoundingClientRect();
+      const point = boardPoint(clientX, clientY, {
+        left: boardBounds.left,
+        top: boardBounds.top,
+        width: boardBounds.width,
+        height: boardBounds.height,
+      });
+      const id = crypto.randomUUID();
+      const box = {
+        kind: 'text-box',
+        id,
+        text: '',
+        style: 'normal',
+        color: 'charcoal',
+        alignment: 'left',
+        scale: 1,
+        x: clamp(
+          point.x + TEXT_BOX_DEFAULT_WIDTH / 2,
+          TEXT_BOX_DEFAULT_WIDTH / 2,
+          BOARD_WIDTH - TEXT_BOX_DEFAULT_WIDTH / 2,
+        ),
+        y: clamp(
+          point.y + TEXT_BOX_MIN_HEIGHT / 2,
+          TEXT_BOX_MIN_HEIGHT / 2,
+          BOARD_HEIGHT - TEXT_BOX_MIN_HEIGHT / 2,
+        ),
+        width: TEXT_BOX_DEFAULT_WIDTH,
+        height: TEXT_BOX_MIN_HEIGHT,
+        rotation: 0,
+      } satisfies CanvasTextBox;
+
+      setPendingTextBox({ box, slideId: deck.activeSlideId });
+      setSelectedToolId('select');
+      setSelectedItemId(id);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      setTextBoxEdit({
+        itemId: id,
+        slideId: deck.activeSlideId,
+        draft: '',
+        height: box.height,
+        isNew: true,
+      });
+    },
+    [
+      cancelActiveGesture,
+      deck.activeSlideId,
+      finishStickyNoteEdit,
+      finishTextBoxEdit,
+    ],
+  );
+
+  const syncTextBoxHeight = useCallback(
+    (itemId: string, height: number) => {
+      if (textBoxEdit?.itemId === itemId) {
+        setTextBoxEdit((current) =>
+          current?.itemId === itemId && Math.abs(current.height - height) >= 0.1
+            ? { ...current, height }
+            : current,
+        );
+        return;
+      }
+
+      if (pendingTextBox?.box.id === itemId) {
+        setPendingTextBox((current) => {
+          if (current?.box.id !== itemId) return current;
+          const box = textBoxWithHeight(current.box, height);
+          return box === current.box ? current : { ...current, box };
+        });
+        return;
+      }
+
+      setDeck((current) => {
+        let changed = false;
+        const slides = current.slides.map((slide) => {
+          if (slide.id !== current.activeSlideId) return slide;
+          const present = slide.history.present.map((item) => {
+            if (item.id !== itemId || item.kind !== 'text-box') return item;
+            const nextItem = textBoxWithHeight(item, height);
+            if (nextItem !== item) changed = true;
+            return nextItem;
+          });
+          return changed
+            ? { ...slide, history: { ...slide.history, present } }
+            : slide;
+        });
+        return changed ? { ...current, slides } : current;
+      });
+    },
+    [pendingTextBox, setDeck, textBoxEdit],
+  );
+
+  const updateTextBox = useCallback(
+    (itemId: string, update: (box: CanvasTextBox) => CanvasTextBox) => {
+      if (pendingTextBox?.box.id === itemId) {
+        setPendingTextBox((current) =>
+          current?.box.id === itemId
+            ? { ...current, box: update(current.box) }
+            : current,
+        );
+        return;
+      }
+
+      commit((items) => {
+        const box = items.find(
+          (item): item is CanvasTextBox =>
+            item.id === itemId && item.kind === 'text-box',
+        );
+        if (!box) return items;
+        const nextBox = update(box);
+        if (nextBox === box) return items;
+        return items.map((item) => (item.id === itemId ? nextBox : item));
+      });
+    },
+    [commit, pendingTextBox],
+  );
+
+  const changeTextBoxStyle = useCallback(
+    (itemId: string, style: TextBoxStyle) => {
+      updateTextBox(itemId, (box) =>
+        box.style === style && box.scale === 1
+          ? box
+          : { ...box, style, scale: 1 },
+      );
+    },
+    [updateTextBox],
+  );
+
+  const changeTextBoxColor = useCallback(
+    (itemId: string, color: TextBoxColor) => {
+      updateTextBox(itemId, (box) =>
+        box.color === color ? box : { ...box, color },
+      );
+    },
+    [updateTextBox],
+  );
+
+  const changeTextBoxAlignment = useCallback(
+    (itemId: string, alignment: TextBoxAlignment) => {
+      updateTextBox(itemId, (box) =>
+        box.alignment === alignment ? box : { ...box, alignment },
+      );
+    },
+    [updateTextBox],
+  );
+
+  const changeStickyNoteColor = useCallback(
+    (itemId: string, color: StickyNoteColor) => {
+      if (pendingStickyNote?.note.id === itemId) {
+        setPendingStickyNote((current) =>
+          current?.note.id === itemId && current.note.color !== color
+            ? { ...current, note: { ...current.note, color } }
+            : current,
+        );
+        setOpenColorPickerId(null);
+        return;
+      }
+
+      commit((items) => {
+        const note = items.find((item) => item.id === itemId);
+        if (!note || note.kind !== 'sticky-note' || note.color === color) {
+          return items;
+        }
+
+        return items.map((item) =>
+          item.id === itemId && item.kind === 'sticky-note'
+            ? { ...item, color }
+            : item,
+        );
+      });
+      setOpenColorPickerId(null);
+    },
+    [commit, pendingStickyNote],
+  );
+
+  const changeShapeColor = useCallback(
+    (itemId: string, color: ShapeColor) => {
+      commit((items) => {
+        const shape = items.find((item) => item.id === itemId);
+        if (!shape || shape.kind !== 'shape' || shape.color === color) {
+          return items;
+        }
+
+        return items.map((item) =>
+          item.id === itemId && item.kind === 'shape'
+            ? { ...item, color }
+            : item,
+        );
+      });
+      setActiveShapeColor(color);
+      setOpenColorPickerId(null);
+    },
+    [commit],
+  );
+
+  const chooseShape = useCallback(
+    (shape: ShapeType) => {
+      cancelActiveMarking();
+      finishStickyNoteEdit();
+      finishTextBoxEdit();
+      cancelActiveGesture();
+      closeDrawingMenu();
+      setActiveShape(shape);
+      setSelectedToolId('shape');
+      setSelectedItemId(null);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+      closeShapeMenu(true);
+    },
+    [
+      cancelActiveGesture,
+      cancelActiveMarking,
+      closeDrawingMenu,
+      closeShapeMenu,
+      finishStickyNoteEdit,
+      finishTextBoxEdit,
+    ],
+  );
+
+  const selectTool = useCallback(
+    (tool: Tool, toggleDrawingOptions = true) => {
+      cancelActiveMarking();
+      finishStickyNoteEdit();
+      finishTextBoxEdit();
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
+
+      if (
+        tool.id === 'pen' ||
+        tool.id === 'eraser' ||
+        tool.id === 'laser-pointer'
+      ) {
+        cancelActiveGesture();
+        setSelectedItemId(null);
+        setSelectedToolId(tool.id);
+        closeShapeMenu();
+        if (tool.id === 'pen') {
+          setIsDrawingMenuOpen((current) =>
+            toggleDrawingOptions && selectedToolId === 'pen' ? !current : false,
+          );
+        } else {
+          closeDrawingMenu();
+        }
+        return;
+      }
+
+      if (tool.id === 'shape') {
+        cancelActiveGesture();
+        setSelectedItemId(null);
+        setSelectedToolId('shape');
+        closeDrawingMenu();
+        setIsShapeMenuOpen((current) =>
+          toggleDrawingOptions
+            ? selectedToolId === 'shape'
+              ? !current
+              : true
+            : false,
+        );
+        return;
+      }
+
+      if (tool.id === 'text-box') {
+        cancelActiveGesture();
+        setSelectedItemId(null);
+      }
+
+      closeDrawingMenu();
+      closeShapeMenu();
+      setSelectedToolId(tool.id);
+    },
+    [
+      cancelActiveGesture,
+      cancelActiveMarking,
+      closeDrawingMenu,
+      closeShapeMenu,
+      finishStickyNoteEdit,
+      finishTextBoxEdit,
+      selectedToolId,
+    ],
   );
 
   const pasteImages = useCallback(
     async (files: File[]) => {
       const targetSlideId = activeSlideIdRef.current;
+      cancelActiveMarking();
+      closeDrawingMenu();
+      closeShapeMenu();
       cancelActiveGesture();
-      setSelectedImageId(null);
-      setOpenMenuId(null);
+      setSelectedItemId(null);
+      setOpenItemMenuId(null);
+      setOpenColorPickerId(null);
       const results = await Promise.allSettled(files.map(decodeImageFile));
       const decoded = results.flatMap((result) =>
         result.status === 'fulfilled' ? [result.value] : [],
@@ -319,6 +1843,7 @@ export default function BoardApp() {
       const additions = decoded.map((image) => {
         const size = fittedImageSize(image.naturalWidth, image.naturalHeight);
         return {
+          kind: 'image',
           id: crypto.randomUUID(),
           src: image.src,
           name: image.name,
@@ -334,8 +1859,8 @@ export default function BoardApp() {
       const concurrentGesture =
         gestureAtCompletion?.slideId === targetSlideId
           ? {
-              imageId: gestureAtCompletion.imageId,
-              initialImage: gestureAtCompletion.initialImage,
+              itemId: gestureAtCompletion.itemId,
+              initialItem: gestureAtCompletion.initialItem,
             }
           : null;
 
@@ -345,15 +1870,18 @@ export default function BoardApp() {
         );
         if (!targetSlide) return current;
 
-        const beforeImages = concurrentGesture
-          ? targetSlide.history.present.map((currentImage) =>
-              currentImage.id === concurrentGesture.imageId
-                ? concurrentGesture.initialImage
-                : currentImage,
+        const beforeItems = concurrentGesture
+          ? targetSlide.history.present.map((currentItem) =>
+              currentItem.id === concurrentGesture.itemId
+                ? concurrentGesture.initialItem
+                : currentItem,
             )
           : targetSlide.history.present;
+        const existingObjectCount = targetSlide.history.present.filter(
+          (item) => item.kind !== 'stroke',
+        ).length;
         const positioned = additions.map((image, index) => {
-          const offset = ((targetSlide.history.present.length + index) % 5) * 22;
+          const offset = ((existingObjectCount + index) % 5) * 22;
           return {
             ...image,
             x: clamp(
@@ -375,7 +1903,7 @@ export default function BoardApp() {
                 slide.id === targetSlideId
                   ? {
                       ...slide,
-                      history: { ...slide.history, present: beforeImages },
+                      history: { ...slide.history, present: beforeItems },
                     }
                   : slide,
               ),
@@ -386,7 +1914,7 @@ export default function BoardApp() {
             ? {
                 ...slide,
                 history: {
-                  past: addToPast(slide.history.past, beforeImages),
+                  past: addToPast(slide.history.past, beforeItems),
                   present: [...slide.history.present, ...positioned],
                   future: [],
                 },
@@ -401,10 +1929,11 @@ export default function BoardApp() {
         };
       });
       if (activeSlideIdRef.current === targetSlideId) {
-        setSelectedImageId(
-          concurrentGesture?.imageId ?? additions.at(-1)?.id ?? null,
+        setSelectedItemId(
+          concurrentGesture?.itemId ?? additions.at(-1)?.id ?? null,
         );
-        setOpenMenuId(null);
+        setOpenItemMenuId(null);
+        setOpenColorPickerId(null);
         setNotice(
           additions.length === 1
             ? 'Image pasted. Drag to move it and use the blue corners to resize.'
@@ -412,13 +1941,100 @@ export default function BoardApp() {
         );
       }
     },
-    [cancelActiveGesture],
+    [
+      cancelActiveGesture,
+      cancelActiveMarking,
+      closeDrawingMenu,
+      closeShapeMenu,
+    ],
   );
 
   useEffect(() => {
+    const handleCopy = (event: ClipboardEvent) => {
+      if (isTextEntry(event.target) || !selectedItemId) {
+        copiedItemRef.current = null;
+        copiedItemLabelRef.current = null;
+        copiedItemInternalOnlyRef.current = false;
+        return;
+      }
+      const item = history.present.find(
+        (candidate): candidate is TransformableCanvasItem =>
+          candidate.id === selectedItemId && candidate.kind !== 'stroke',
+      );
+      if (!item || !event.clipboardData) return;
+
+      const label = clipboardLabel(item);
+      event.preventDefault();
+      copiedItemRef.current = { ...item };
+      copiedItemLabelRef.current = label;
+      const canWriteCustomData =
+        item.kind !== 'image' ||
+        item.src.length + (item.backgroundRemovedSrc?.length ?? 0) <=
+          MAX_CUSTOM_CLIPBOARD_SOURCE_CHARACTERS;
+      let wroteCustomData = false;
+      let wroteText = false;
+      if (canWriteCustomData) {
+        try {
+          event.clipboardData.setData(ITEM_CLIPBOARD_TYPE, JSON.stringify(item));
+          wroteCustomData = true;
+        } catch {
+          // The in-board copy below still retains both committed image variants.
+        }
+      }
+      try {
+        event.clipboardData.setData('text/plain', label);
+        wroteText = true;
+      } catch {
+        // Some clipboard implementations reject large custom payloads.
+      }
+      copiedItemInternalOnlyRef.current = !wroteCustomData;
+      copyEventHandledRef.current = true;
+      setNotice(
+        wroteCustomData || wroteText
+          ? `${
+              item.kind === 'shape'
+                ? 'Shape'
+                : item.kind === 'text-box'
+                  ? 'Text box'
+                  : 'Object'
+            } copied.`
+          : `${
+              item.kind === 'shape'
+                ? 'Shape'
+                : item.kind === 'text-box'
+                  ? 'Text box'
+                  : 'Object'
+            } copied in this board.`,
+      );
+    };
+
     const handlePaste = (event: ClipboardEvent) => {
       if (isTextEntry(event.target)) return;
 
+      const serializedItem = event.clipboardData?.getData(ITEM_CLIPBOARD_TYPE);
+      if (serializedItem) {
+        try {
+          const item: unknown = JSON.parse(serializedItem);
+          if (isClipboardItem(item)) {
+            event.preventDefault();
+            addCopiedItem(
+              item,
+              `${
+                item.kind === 'shape'
+                  ? 'Shape'
+                  : item.kind === 'text-box'
+                    ? 'Text box'
+                    : 'Object'
+              } pasted.`,
+            );
+            return;
+          }
+        } catch {
+          // Ignore malformed clipboard data and continue to supported files.
+        }
+      }
+
+      const clipboardText = event.clipboardData?.getData('text/plain');
       const itemFiles = Array.from(event.clipboardData?.items ?? [])
         .filter((item) => item.kind === 'file')
         .map((item) => item.getAsFile())
@@ -427,30 +2043,109 @@ export default function BoardApp() {
         itemFiles.length > 0
           ? itemFiles
           : Array.from(event.clipboardData?.files ?? []);
+      if (
+        copiedItemRef.current &&
+        (clipboardText === copiedItemLabelRef.current ||
+          (copiedItemInternalOnlyRef.current && files.length === 0))
+      ) {
+        event.preventDefault();
+        addCopiedItem(
+          copiedItemRef.current,
+          `${
+            copiedItemRef.current.kind === 'shape'
+              ? 'Shape'
+              : copiedItemRef.current.kind === 'text-box'
+                ? 'Text box'
+                : 'Object'
+          } pasted.`,
+        );
+        return;
+      }
 
       if (files.length === 0) return;
       event.preventDefault();
       void pasteImages(files);
     };
 
+    window.addEventListener('copy', handleCopy);
     window.addEventListener('paste', handlePaste);
-    return () => window.removeEventListener('paste', handlePaste);
-  }, [pasteImages]);
+    return () => {
+      window.removeEventListener('copy', handleCopy);
+      window.removeEventListener('paste', handlePaste);
+    };
+  }, [addCopiedItem, history.present, pasteImages, selectedItemId]);
+
+  useEffect(() => {
+    const clearInternalClipboardFallback = () => {
+      if (!copiedItemInternalOnlyRef.current) return;
+      copiedItemRef.current = null;
+      copiedItemLabelRef.current = null;
+      copiedItemInternalOnlyRef.current = false;
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        clearInternalClipboardFallback();
+      }
+    };
+
+    window.addEventListener('blur', clearInternalClipboardFallback);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('blur', clearInternalClipboardFallback);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isTextEntry(event.target)) return;
 
       if (event.key === 'Escape') {
+        if (
+          inkGestureRef.current ||
+          laserGestureRef.current ||
+          eraserGestureRef.current ||
+          shapeGestureRef.current
+        ) {
+          event.preventDefault();
+          cancelActiveMarking();
+          return;
+        }
+
+        if (isDrawingMenuOpen) {
+          event.preventDefault();
+          closeDrawingMenu(true);
+          return;
+        }
+
+        if (isShapeMenuOpen) {
+          event.preventDefault();
+          closeShapeMenu(true);
+          return;
+        }
+
         if (openSlideMenuId) {
           event.preventDefault();
           closeSlideMenu(true);
           return;
         }
 
+        if (openItemMenuId) {
+          event.preventDefault();
+          const itemId = openItemMenuId;
+          setOpenItemMenuId(null);
+          window.requestAnimationFrame(() => {
+            itemMenuButtonRefsRef.current
+              .get(itemId)
+              ?.focus({ preventScroll: true });
+          });
+          return;
+        }
+
         closeSlideOverview('counter');
-        setOpenMenuId(null);
-        setSelectedImageId(null);
+        setOpenItemMenuId(null);
+        setOpenColorPickerId(null);
+        setSelectedItemId(null);
         return;
       }
 
@@ -470,10 +2165,29 @@ export default function BoardApp() {
         return;
       }
 
+      if (
+        !commandKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        !isSlideOverviewOpen &&
+        (key === 'p' || key === 'e')
+      ) {
+        const shortcutTool = tools.find(
+          (tool) => tool.shortcut?.toLowerCase() === key,
+        );
+        if (shortcutTool) {
+          event.preventDefault();
+          selectTool(shortcutTool, false);
+          return;
+        }
+      }
+
+      if (isDrawingMenuOpen || isShapeMenuOpen) return;
+
       const isHorizontalArrow =
         event.key === 'ArrowLeft' || event.key === 'ArrowRight';
       const canNavigateWithArrows =
-        isSlideOverviewOpen || (!selectedImageId && !openMenuId);
+        isSlideOverviewOpen || (!selectedItemId && !openItemMenuId);
 
       if (
         isHorizontalArrow &&
@@ -499,9 +2213,12 @@ export default function BoardApp() {
 
       if (isSlideOverviewOpen) return;
 
-      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedImageId) {
+      if (
+        (event.key === 'Delete' || event.key === 'Backspace') &&
+        selectedItemId
+      ) {
         event.preventDefault();
-        deleteImage(selectedImageId);
+        deleteItem(selectedItemId);
         return;
       }
 
@@ -511,16 +2228,22 @@ export default function BoardApp() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     closeSlideOverview,
+    closeDrawingMenu,
+    closeShapeMenu,
     closeSlideMenu,
+    cancelActiveMarking,
     deck.activeSlideId,
-    deleteImage,
+    deleteItem,
     deleteSlide,
     isSlideOverviewOpen,
+    isDrawingMenuOpen,
+    isShapeMenuOpen,
     navigateToAdjacentSlide,
-    openMenuId,
+    openItemMenuId,
     openSlideMenuId,
     redo,
-    selectedImageId,
+    selectTool,
+    selectedItemId,
     undo,
   ]);
 
@@ -531,17 +2254,127 @@ export default function BoardApp() {
   }, [notice]);
 
   useEffect(() => {
-    if (!openMenuId) return;
+    if (selectedToolId !== 'laser-pointer') return;
+
+    const clearLaserPointer = () => cancelActiveLaserPointer();
+    const clearHiddenLaserPointer = () => {
+      if (document.visibilityState === 'hidden') clearLaserPointer();
+    };
+
+    window.addEventListener('blur', clearLaserPointer);
+    document.addEventListener('visibilitychange', clearHiddenLaserPointer);
+    return () => {
+      window.removeEventListener('blur', clearLaserPointer);
+      document.removeEventListener('visibilitychange', clearHiddenLaserPointer);
+    };
+  }, [cancelActiveLaserPointer, selectedToolId]);
+
+  useEffect(() => {
+    Array.from(backgroundRemovalJobsRef.current.values()).forEach((job) => {
+      const slide = deck.slides.find((candidate) => candidate.id === job.slideId);
+      const image = slide?.history.present.find(
+        (item): item is CanvasImage =>
+          item.id === job.itemId && item.kind === 'image',
+      );
+      if (!image || image.src !== job.originalSrc) {
+        removeTrackedBackgroundRemovalJob(job, true);
+      }
+    });
+  }, [deck, removeTrackedBackgroundRemovalJob]);
+
+  useEffect(
+    () => () => {
+      stickyNoteDiscardTimersRef.current.forEach((timer) =>
+        window.clearTimeout(timer),
+      );
+      if (inkRenderFrameRef.current !== null) {
+        window.cancelAnimationFrame(inkRenderFrameRef.current);
+      }
+      backgroundRemovalJobsRef.current.forEach((job) =>
+        job.controller.abort(),
+      );
+      backgroundRemovalJobsRef.current.clear();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!isDrawingMenuOpen) return;
 
     const closeMenu = (event: PointerEvent) => {
       if (!(event.target instanceof Element)) return;
-      if (event.target.closest(`[data-item-menu="${openMenuId}"]`)) return;
-      setOpenMenuId(null);
+      if (event.target.closest('[data-drawing-menu]')) return;
+      closeDrawingMenu();
     };
 
     document.addEventListener('pointerdown', closeMenu, true);
     return () => document.removeEventListener('pointerdown', closeMenu, true);
-  }, [openMenuId]);
+  }, [closeDrawingMenu, isDrawingMenuOpen]);
+
+  useEffect(() => {
+    if (!isShapeMenuOpen) return;
+
+    const closeMenu = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest('[data-shape-menu]')) return;
+      closeShapeMenu();
+    };
+
+    document.addEventListener('pointerdown', closeMenu, true);
+    return () => document.removeEventListener('pointerdown', closeMenu, true);
+  }, [closeShapeMenu, isShapeMenuOpen]);
+
+  useEffect(() => {
+    if (!openItemMenuId) return;
+
+    const closeMenu = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest(`[data-item-menu="${openItemMenuId}"]`)) return;
+      setOpenItemMenuId(null);
+    };
+
+    document.addEventListener('pointerdown', closeMenu, true);
+    return () => document.removeEventListener('pointerdown', closeMenu, true);
+  }, [openItemMenuId]);
+
+  useEffect(() => {
+    if (!openItemMenuId || !focusItemMenuOnOpenRef.current) return;
+    focusItemMenuOnOpenRef.current = false;
+    const animationFrame = window.requestAnimationFrame(() => {
+      const anchor = itemMenuButtonRefsRef.current
+        .get(openItemMenuId)
+        ?.closest<HTMLElement>('[data-item-menu]');
+      anchor
+        ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
+        ?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [openItemMenuId]);
+
+  useEffect(() => {
+    if (!openColorPickerId) return;
+
+    const closeColorPicker = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest(`[data-color-picker="${openColorPickerId}"]`)) {
+        return;
+      }
+      setOpenColorPickerId(null);
+    };
+
+    document.addEventListener('pointerdown', closeColorPicker, true);
+    return () =>
+      document.removeEventListener('pointerdown', closeColorPicker, true);
+  }, [openColorPickerId]);
+
+  useEffect(() => {
+    if (!openColorPickerId || !focusColorPickerOnOpenRef.current) return;
+    focusColorPickerOnOpenRef.current = false;
+    const animationFrame = window.requestAnimationFrame(() => {
+      activeColorChoiceRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [openColorPickerId]);
 
   useEffect(() => {
     if (!openSlideMenuId) return;
@@ -559,14 +2392,25 @@ export default function BoardApp() {
 
   const startGesture = (
     event: ReactPointerEvent<HTMLElement>,
-    image: CanvasImage,
+    item: TransformableCanvasItem,
     kind: Gesture['kind'],
-    corner?: ResizeCorner,
+    handle?: ResizeCorner | ResizeSide,
   ) => {
     if (event.button !== 0 || !boardRef.current) return;
 
     event.preventDefault();
     event.stopPropagation();
+    const itemAtStart =
+      item.kind === 'sticky-note' && stickyNoteEdit?.itemId === item.id
+        ? { ...item, text: stickyNoteEdit.draft }
+        : item.kind === 'text-box' && textBoxEdit?.itemId === item.id
+          ? textBoxWithHeight(
+              { ...item, text: textBoxEdit.draft },
+              textBoxEdit.height,
+            )
+          : item;
+    finishStickyNoteEdit();
+    finishTextBoxEdit();
     const rect = boardRef.current.getBoundingClientRect();
     const compactRect: BoardRect = {
       left: rect.left,
@@ -575,26 +2419,58 @@ export default function BoardApp() {
       height: rect.height,
     };
     const startPoint = boardPoint(event.clientX, event.clientY, compactRect);
+    const initialIndex = history.present.findIndex(
+      (currentItem) => currentItem.id === itemAtStart.id,
+    );
+    const lastItemIndex = history.present.length - 1;
+    const broughtToFront =
+      itemAtStart.kind !== 'text-box' &&
+      initialIndex >= 0 &&
+      initialIndex !== lastItemIndex;
 
     gestureRef.current = {
       kind,
       pointerId: event.pointerId,
       slideId: deck.activeSlideId,
-      imageId: image.id,
-      initialImage: image,
+      itemId: itemAtStart.id,
+      initialItem: itemAtStart,
+      initialIndex,
+      broughtToFront,
       boardRect: compactRect,
       startPoint,
       startAngle:
         kind === 'rotate'
-          ? Math.atan2(startPoint.y - image.y, startPoint.x - image.x) *
+          ? Math.atan2(startPoint.y - itemAtStart.y, startPoint.x - itemAtStart.x) *
             (180 / Math.PI)
           : undefined,
-      corner,
+      corner: kind === 'resize' ? (handle as ResizeCorner) : undefined,
+      side: kind === 'resize-width' ? (handle as ResizeSide) : undefined,
       moved: false,
     };
+    if (broughtToFront) {
+      setDeck((current) => ({
+        ...current,
+        slides: current.slides.map((slide) =>
+          slide.id === deck.activeSlideId
+            ? {
+                ...slide,
+                history: {
+                  ...slide.history,
+                  present: bringItemToFront(
+                    slide.history.present,
+                    itemAtStart.id,
+                  ),
+                },
+              }
+            : slide,
+        ),
+      }));
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
-    setSelectedImageId(image.id);
-    setOpenMenuId(null);
+    setSelectedToolId('select');
+    setSelectedItemId(itemAtStart.id);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -603,43 +2479,69 @@ export default function BoardApp() {
 
     event.preventDefault();
     const point = boardPoint(event.clientX, event.clientY, gesture.boardRect);
-    const image = gesture.initialImage;
-    let nextImage = image;
+    const item = gesture.initialItem;
+    let nextItem = item;
 
     if (gesture.kind === 'move') {
       const deltaX = point.x - gesture.startPoint.x;
       const deltaY = point.y - gesture.startPoint.y;
-      const radians = (image.rotation * Math.PI) / 180;
-      const horizontalExtent =
-        (Math.abs(Math.cos(radians)) * image.width +
-          Math.abs(Math.sin(radians)) * image.height) /
-        2;
-      const verticalExtent =
-        (Math.abs(Math.sin(radians)) * image.width +
-          Math.abs(Math.cos(radians)) * image.height) /
-        2;
+      const extents = rotatedItemExtents(item);
 
-      nextImage = {
-        ...image,
-        x: clamp(image.x + deltaX, horizontalExtent, BOARD_WIDTH - horizontalExtent),
-        y: clamp(image.y + deltaY, verticalExtent, BOARD_HEIGHT - verticalExtent),
+      nextItem = {
+        ...item,
+        x: clamp(
+          item.x + deltaX,
+          extents.horizontal,
+          BOARD_WIDTH - extents.horizontal,
+        ),
+        y: clamp(
+          item.y + deltaY,
+          extents.vertical,
+          BOARD_HEIGHT - extents.vertical,
+        ),
       };
     } else if (gesture.kind === 'resize' && gesture.corner) {
-      nextImage = resizedImage(image, gesture.corner, point);
+      if (item.kind === 'text-box') {
+        const resized = resizedItem(
+          item,
+          gesture.corner,
+          point,
+          true,
+          16,
+        );
+        nextItem = {
+          ...resized,
+          scale: item.scale * (resized.width / item.width),
+        };
+      } else {
+        nextItem = resizedItem(
+          item,
+          gesture.corner,
+          point,
+          item.kind !== 'shape' || item.shape === 'square' || event.shiftKey,
+          item.kind === 'shape' ? MIN_SHAPE_DRAW_SIZE : undefined,
+        );
+      }
+    } else if (
+      gesture.kind === 'resize-width' &&
+      gesture.side &&
+      item.kind === 'text-box'
+    ) {
+      nextItem = resizedItemWidth(item, gesture.side, point, TEXT_BOX_MIN_WIDTH);
     } else if (gesture.kind === 'rotate' && gesture.startAngle !== undefined) {
       const pointerAngle =
-        Math.atan2(point.y - image.y, point.x - image.x) * (180 / Math.PI);
-      let rotation = image.rotation + pointerAngle - gesture.startAngle;
+        Math.atan2(point.y - item.y, point.x - item.x) * (180 / Math.PI);
+      let rotation = item.rotation + pointerAngle - gesture.startAngle;
       if (event.shiftKey) rotation = Math.round(rotation / 15) * 15;
-      nextImage = { ...image, rotation };
+      nextItem = { ...item, rotation };
     }
 
     const changed =
-      Math.abs(nextImage.x - image.x) > 0.01 ||
-      Math.abs(nextImage.y - image.y) > 0.01 ||
-      Math.abs(nextImage.width - image.width) > 0.01 ||
-      Math.abs(nextImage.height - image.height) > 0.01 ||
-      Math.abs(nextImage.rotation - image.rotation) > 0.01;
+      Math.abs(nextItem.x - item.x) > 0.01 ||
+      Math.abs(nextItem.y - item.y) > 0.01 ||
+      Math.abs(nextItem.width - item.width) > 0.01 ||
+      Math.abs(nextItem.height - item.height) > 0.01 ||
+      Math.abs(nextItem.rotation - item.rotation) > 0.01;
 
     if (!changed) return;
     gesture.moved = true;
@@ -654,8 +2556,8 @@ export default function BoardApp() {
                 ...slide,
                 history: {
                   ...slide.history,
-                  present: slide.history.present.map((currentImage) =>
-                    currentImage.id === gesture.imageId ? nextImage : currentImage,
+                  present: slide.history.present.map((currentItem) =>
+                    currentItem.id === gesture.itemId ? nextItem : currentItem,
                   ),
                 },
               }
@@ -670,7 +2572,10 @@ export default function BoardApp() {
     if (!gesture || gesture.pointerId !== event.pointerId) return;
 
     gestureRef.current = null;
-    if (!gesture.moved) return;
+    if (!gesture.moved && !gesture.broughtToFront) {
+      flushCompletedBackgroundRemovals();
+      return;
+    }
 
     setDeckHistory((current) => {
       if (current.present.activeSlideId !== gesture.slideId) return current;
@@ -680,8 +2585,9 @@ export default function BoardApp() {
       );
       if (!targetSlide) return current;
 
-      const beforeImages = targetSlide.history.present.map((image) =>
-        image.id === gesture.imageId ? gesture.initialImage : image,
+      const beforeItems = restoreGestureStart(
+        targetSlide.history.present,
+        gesture,
       );
       const beforeDeck = {
         ...current.present,
@@ -689,7 +2595,7 @@ export default function BoardApp() {
           slide.id === gesture.slideId
             ? {
                 ...slide,
-                history: { ...slide.history, present: beforeImages },
+                history: { ...slide.history, present: beforeItems },
               }
             : slide,
         ),
@@ -699,11 +2605,11 @@ export default function BoardApp() {
           ? {
               ...slide,
               history: {
-                past: addToPast(slide.history.past, beforeImages),
-                present: slide.history.present.map((image) =>
-                  image.id === gesture.imageId
-                    ? { ...image, rotation: normalizeRotation(image.rotation) }
-                    : image,
+                past: addToPast(slide.history.past, beforeItems),
+                present: slide.history.present.map((item) =>
+                  item.id === gesture.itemId && item.kind !== 'stroke'
+                    ? { ...item, rotation: normalizeRotation(item.rotation) }
+                    : item,
                 ),
                 future: [],
               },
@@ -717,14 +2623,704 @@ export default function BoardApp() {
         future: [],
       };
     });
+    flushCompletedBackgroundRemovals();
+  };
+
+  const appendPointerEventToInk = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const gesture = inkGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return null;
+
+    const coalescedEvents = event.nativeEvent.getCoalescedEvents?.() ?? [];
+    const samples =
+      coalescedEvents.length > 0
+        ? coalescedEvents
+        : [event.nativeEvent];
+    const candidates: StrokePoint[] = samples.map((sample) => {
+      const point = boardPoint(
+        sample.clientX,
+        sample.clientY,
+        gesture.boardRect,
+      );
+      const rawTime = Number.isFinite(sample.timeStamp)
+        ? sample.timeStamp
+        : gesture.lastSample.time + 16.67;
+      const sampleTime =
+        rawTime > gesture.lastSample.time
+          ? rawTime
+          : gesture.lastSample.time + 1;
+      const elapsed = sampleTime - gesture.lastSample.time;
+      const horizontalScale = gesture.boardRect.width / BOARD_WIDTH;
+      const verticalScale = gesture.boardRect.height / BOARD_HEIGHT;
+      const distance = Math.hypot(
+        (point.x - gesture.lastSample.x) * horizontalScale,
+        (point.y - gesture.lastSample.y) * verticalScale,
+      );
+      const rawVelocity = distance / elapsed;
+      if (gesture.velocity === null) {
+        if (distance > 0.01) gesture.velocity = rawVelocity;
+      } else {
+        const blend = 1 - Math.exp(-elapsed / 28);
+        gesture.velocity += (rawVelocity - gesture.velocity) * blend;
+      }
+      gesture.lastSample = { ...point, time: sampleTime };
+
+      return { ...point, velocity: gesture.velocity ?? 0 };
+    });
+    const appended = appendStrokePoints(gesture.stroke.points, candidates);
+
+    if (appended && inkRenderFrameRef.current === null) {
+      inkRenderFrameRef.current = window.requestAnimationFrame(() => {
+        inkRenderFrameRef.current = null;
+        if (!inkGestureRef.current) return;
+        activeInkRendererRef.current?.redraw();
+      });
+    }
+
+    return gesture;
+  };
+
+  const startInkStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (
+      event.button !== 0 ||
+      !event.isPrimary ||
+      inkGestureRef.current
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    finishStickyNoteEdit();
+    finishTextBoxEdit();
+    cancelActiveGesture();
+    closeDrawingMenu();
+    closeShapeMenu();
+    setSelectedItemId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const boardRect: BoardRect = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const point = boardPoint(event.clientX, event.clientY, boardRect);
+    const sampleTime = Number.isFinite(event.nativeEvent.timeStamp)
+      ? event.nativeEvent.timeStamp
+      : 0;
+    const stroke: CanvasStroke = {
+      kind: 'stroke',
+      id: crypto.randomUUID(),
+      style: drawingStyle,
+      color: drawingColor,
+      points: [
+        {
+          x: clamp(point.x, 0, BOARD_WIDTH),
+          y: clamp(point.y, 0, BOARD_HEIGHT),
+          velocity: 0,
+        },
+      ],
+    };
+
+    inkGestureRef.current = {
+      pointerId: event.pointerId,
+      slideId: deck.activeSlideId,
+      boardRect,
+      stroke,
+      lastSample: {
+        x: clamp(point.x, 0, BOARD_WIDTH),
+        y: clamp(point.y, 0, BOARD_HEIGHT),
+        time: sampleTime,
+      },
+      velocity: null,
+    };
+    setPendingStroke(stroke);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const moveInkStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!inkGestureRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    appendPointerEventToInk(event);
+  };
+
+  const finishInkStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = appendPointerEventToInk(event);
+    if (!gesture) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    if (inkRenderFrameRef.current !== null) {
+      window.cancelAnimationFrame(inkRenderFrameRef.current);
+      inkRenderFrameRef.current = null;
+    }
+    inkGestureRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setPendingStroke(null);
+
+    if (activeSlideIdRef.current !== gesture.slideId) return;
+    const completedStroke = {
+      ...gesture.stroke,
+      points: [...gesture.stroke.points],
+    };
+    commit((currentItems) => [...currentItems, completedStroke]);
+  };
+
+  const appendPointerEventToLaser = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const gesture = laserGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return null;
+
+    const coalescedEvents = event.nativeEvent.getCoalescedEvents?.() ?? [];
+    const samples =
+      coalescedEvents.length > 0 ? coalescedEvents : [event.nativeEvent];
+    const capturedAt = performance.now();
+    const newestSampleTimestamp =
+      samples.at(-1)?.timeStamp ?? event.nativeEvent.timeStamp;
+    const points: LaserPoint[] = samples.map((sample) => {
+      const point = boardPoint(
+        sample.clientX,
+        sample.clientY,
+        gesture.boardRect,
+      );
+      const sampleAge = Math.min(
+        1000,
+        Math.max(0, newestSampleTimestamp - sample.timeStamp),
+      );
+      return {
+        x: clamp(point.x, 0, BOARD_WIDTH),
+        y: clamp(point.y, 0, BOARD_HEIGHT),
+        createdAt: capturedAt - sampleAge,
+      };
+    });
+    activeLaserRendererRef.current?.appendPoints(gesture.trailId, points);
+    return gesture;
+  };
+
+  const startLaserTrail = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (
+      event.button !== 0 ||
+      !event.isPrimary ||
+      laserGestureRef.current
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    finishStickyNoteEdit();
+    finishTextBoxEdit();
+    cancelActiveGesture();
+    closeDrawingMenu();
+    closeShapeMenu();
+    setSelectedItemId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const boardRect: BoardRect = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const point = boardPoint(event.clientX, event.clientY, boardRect);
+    const trailId = crypto.randomUUID();
+    const firstPoint: LaserPoint = {
+      x: clamp(point.x, 0, BOARD_WIDTH),
+      y: clamp(point.y, 0, BOARD_HEIGHT),
+      createdAt: performance.now(),
+    };
+
+    laserGestureRef.current = {
+      pointerId: event.pointerId,
+      boardRect,
+      trailId,
+    };
+    activeLaserRendererRef.current?.startTrail(trailId, firstPoint);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const moveLaserTrail = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!laserGestureRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    appendPointerEventToLaser(event);
+  };
+
+  const finishLaserTrail = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = appendPointerEventToLaser(event);
+    if (!gesture) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    laserGestureRef.current = null;
+    activeLaserRendererRef.current?.endTrail(
+      gesture.trailId,
+      performance.now(),
+    );
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const cancelLaserTrail = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = laserGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    laserGestureRef.current = null;
+    activeLaserRendererRef.current?.endTrail(
+      gesture.trailId,
+      performance.now(),
+    );
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const applyEraserSweeps = (
+    gesture: EraserGesture,
+    sweeps: EraserSweep[],
+  ) => {
+    if (sweeps.length === 0) return;
+    const nextItems = applyEraserTraceToItems(
+      gesture.workingItems,
+      gesture.trace,
+      sweeps,
+    );
+    if (nextItems === gesture.workingItems) return;
+
+    gesture.workingItems = nextItems;
+    setPendingErase({ slideId: gesture.slideId, items: nextItems });
+  };
+
+  const appendPointerEventToEraser = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const gesture = eraserGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return null;
+
+    const coalescedEvents = event.nativeEvent.getCoalescedEvents?.() ?? [];
+    const samples =
+      coalescedEvents.length > 0 ? coalescedEvents : [event.nativeEvent];
+    const sweeps: EraserSweep[] = [];
+    const horizontalScale = gesture.boardRect.width / BOARD_WIDTH;
+    const verticalScale = gesture.boardRect.height / BOARD_HEIGHT;
+
+    for (const sample of samples) {
+      const rawPoint = boardPoint(
+        sample.clientX,
+        sample.clientY,
+        gesture.boardRect,
+      );
+      const point = {
+        x: clamp(rawPoint.x, 0, BOARD_WIDTH),
+        y: clamp(rawPoint.y, 0, BOARD_HEIGHT),
+      };
+      const rawTime = Number.isFinite(sample.timeStamp)
+        ? sample.timeStamp
+        : gesture.lastSample.time + 16.67;
+      const sampleTime =
+        rawTime > gesture.lastSample.time
+          ? rawTime
+          : gesture.lastSample.time + 1;
+      const elapsed = sampleTime - gesture.lastSample.time;
+      const distance = Math.hypot(
+        (point.x - gesture.lastSample.x) * horizontalScale,
+        (point.y - gesture.lastSample.y) * verticalScale,
+      );
+
+      if (distance < 0.12) {
+        gesture.lastSample = { ...gesture.lastSample, time: sampleTime };
+        continue;
+      }
+
+      const rawVelocity = distance / elapsed;
+      if (gesture.velocity === null) {
+        gesture.velocity = rawVelocity;
+      } else {
+        const blend = 1 - Math.exp(-elapsed / 28);
+        gesture.velocity += (rawVelocity - gesture.velocity) * blend;
+      }
+
+      const nextPoint: EraserPoint = {
+        ...point,
+        radius: eraserRadiusInBoardUnits(
+          gesture.boardRect,
+          gesture.velocity,
+        ),
+      };
+      const previousPoint: EraserPoint = {
+        x: gesture.lastSample.x,
+        y: gesture.lastSample.y,
+        radius: gesture.lastSample.radius,
+      };
+      const sweep = { from: previousPoint, to: nextPoint };
+      gesture.trace.points.push(nextPoint);
+      gesture.sweeps.push(sweep);
+      sweeps.push(sweep);
+      gesture.lastSample = { ...nextPoint, time: sampleTime };
+    }
+
+    applyEraserSweeps(gesture, sweeps);
+    setEraserPreview({
+      x: gesture.lastSample.x,
+      y: gesture.lastSample.y,
+      radius: gesture.lastSample.radius,
+    });
+    return gesture;
+  };
+
+  const startEraserStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (
+      event.button !== 0 ||
+      !event.isPrimary ||
+      eraserGestureRef.current
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    finishStickyNoteEdit();
+    finishTextBoxEdit();
+    cancelActiveGesture();
+    closeDrawingMenu();
+    closeShapeMenu();
+    setSelectedItemId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const boardRect: BoardRect = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const rawPoint = boardPoint(event.clientX, event.clientY, boardRect);
+    const point: EraserPoint = {
+      x: clamp(rawPoint.x, 0, BOARD_WIDTH),
+      y: clamp(rawPoint.y, 0, BOARD_HEIGHT),
+      radius: eraserRadiusInBoardUnits(boardRect, 0),
+    };
+    const sampleTime = Number.isFinite(event.nativeEvent.timeStamp)
+      ? event.nativeEvent.timeStamp
+      : 0;
+    const trace: EraserTrace = {
+      id: crypto.randomUUID(),
+      points: [point],
+    };
+    const initialSweep = { from: point, to: point };
+    const gesture: EraserGesture = {
+      pointerId: event.pointerId,
+      slideId: deck.activeSlideId,
+      boardRect,
+      initialItems: history.present,
+      workingItems: history.present,
+      trace,
+      sweeps: [initialSweep],
+      lastSample: { ...point, time: sampleTime },
+      velocity: null,
+    };
+
+    eraserGestureRef.current = gesture;
+    setPendingErase({ slideId: gesture.slideId, items: gesture.workingItems });
+    setEraserPreview(point);
+    applyEraserSweeps(gesture, [initialSweep]);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const showEraserPreview = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (eraserGestureRef.current) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const boardRect: BoardRect = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const point = boardPoint(event.clientX, event.clientY, boardRect);
+    setEraserPreview({
+      x: clamp(point.x, 0, BOARD_WIDTH),
+      y: clamp(point.y, 0, BOARD_HEIGHT),
+      radius: eraserRadiusInBoardUnits(boardRect, 0),
+    });
+  };
+
+  const moveEraserStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!eraserGestureRef.current) {
+      showEraserPreview(event);
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    appendPointerEventToEraser(event);
+  };
+
+  const finishEraserStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = appendPointerEventToEraser(event);
+    if (!gesture) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    eraserGestureRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setPendingErase(null);
+    setEraserPreview(
+      event.pointerType === 'touch'
+        ? null
+        : {
+            x: gesture.lastSample.x,
+            y: gesture.lastSample.y,
+            radius: gesture.lastSample.radius,
+          },
+    );
+
+    if (
+      activeSlideIdRef.current !== gesture.slideId ||
+      gesture.workingItems === gesture.initialItems
+    ) {
+      return;
+    }
+
+    const completedItems = gesture.workingItems;
+    const completedTrace: EraserTrace = {
+      id: gesture.trace.id,
+      points: gesture.trace.points.map((point) => ({ ...point })),
+    };
+    const completedSweeps = gesture.sweeps.map((sweep) => ({
+      from: { ...sweep.from },
+      to: { ...sweep.to },
+    }));
+    commit((currentItems) =>
+      currentItems === gesture.initialItems
+        ? completedItems
+        : applyEraserTraceToItems(
+            currentItems,
+            completedTrace,
+            completedSweeps,
+          ),
+    );
+  };
+
+  const cancelEraserStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = eraserGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    cancelActiveEraser();
+  };
+
+  const cancelInkStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = inkGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    cancelActiveInk();
+  };
+
+  const startShapeCreation = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (
+      event.button !== 0 ||
+      !event.isPrimary ||
+      shapeGestureRef.current
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    finishStickyNoteEdit();
+    finishTextBoxEdit();
+    cancelActiveGesture();
+    closeDrawingMenu();
+    closeShapeMenu();
+    setSelectedItemId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const boardRect: BoardRect = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const rawPoint = boardPoint(event.clientX, event.clientY, boardRect);
+    const startPoint = {
+      x: clamp(rawPoint.x, 0, BOARD_WIDTH),
+      y: clamp(rawPoint.y, 0, BOARD_HEIGHT),
+    };
+    const shape: CanvasShape = {
+      kind: 'shape',
+      id: crypto.randomUUID(),
+      shape: activeShape,
+      color: activeShapeColor,
+      arrowDirection: 'right',
+      filled: true,
+      x: startPoint.x,
+      y: startPoint.y,
+      width: 0,
+      height: 0,
+      rotation: 0,
+    };
+
+    shapeGestureRef.current = {
+      pointerId: event.pointerId,
+      slideId: deck.activeSlideId,
+      boardRect,
+      startPoint,
+      shape,
+    };
+    setPendingShape({ shape, slideId: deck.activeSlideId });
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const updateShapeCreation = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = shapeGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return null;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const rawPoint = boardPoint(
+      event.clientX,
+      event.clientY,
+      gesture.boardRect,
+    );
+    const point = {
+      x: clamp(rawPoint.x, 0, BOARD_WIDTH),
+      y: clamp(rawPoint.y, 0, BOARD_HEIGHT),
+    };
+    const deltaX = point.x - gesture.startPoint.x;
+    const deltaY = point.y - gesture.startPoint.y;
+
+    if (gesture.shape.shape === 'square') {
+      const horizontalDirection =
+        deltaX === 0
+          ? gesture.startPoint.x <= BOARD_WIDTH / 2
+            ? 1
+            : -1
+          : Math.sign(deltaX);
+      const verticalDirection =
+        deltaY === 0
+          ? gesture.startPoint.y <= BOARD_HEIGHT / 2
+            ? 1
+            : -1
+          : Math.sign(deltaY);
+      const horizontalRoom =
+        horizontalDirection > 0
+          ? BOARD_WIDTH - gesture.startPoint.x
+          : gesture.startPoint.x;
+      const verticalRoom =
+        verticalDirection > 0
+          ? BOARD_HEIGHT - gesture.startPoint.y
+          : gesture.startPoint.y;
+      const side = Math.min(
+        Math.max(Math.abs(deltaX), Math.abs(deltaY)),
+        horizontalRoom,
+        verticalRoom,
+      );
+
+      gesture.shape = {
+        ...gesture.shape,
+        x: gesture.startPoint.x + (horizontalDirection * side) / 2,
+        y: gesture.startPoint.y + (verticalDirection * side) / 2,
+        width: side,
+        height: side,
+      };
+    } else {
+      gesture.shape = {
+        ...gesture.shape,
+        arrowDirection:
+          gesture.shape.shape === 'arrow'
+            ? deltaX < 0
+              ? 'left'
+              : deltaX > 0
+                ? 'right'
+                : gesture.shape.arrowDirection
+            : gesture.shape.arrowDirection,
+        x: (gesture.startPoint.x + point.x) / 2,
+        y: (gesture.startPoint.y + point.y) / 2,
+        width: Math.abs(deltaX),
+        height: Math.abs(deltaY),
+      };
+    }
+    setPendingShape({ shape: gesture.shape, slideId: gesture.slideId });
+    return gesture;
+  };
+
+  const finishShapeCreation = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = updateShapeCreation(event);
+    if (!gesture) return;
+
+    shapeGestureRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setPendingShape(null);
+
+    const completedShape = gesture.shape;
+    if (
+      activeSlideIdRef.current !== gesture.slideId ||
+      completedShape.width < MIN_SHAPE_DRAW_SIZE ||
+      completedShape.height < MIN_SHAPE_DRAW_SIZE
+    ) {
+      return;
+    }
+
+    commit((items) => [...items, completedShape]);
+    setSelectedToolId('select');
+    setSelectedItemId(completedShape.id);
+  };
+
+  const cancelShapeCreation = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = shapeGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    cancelActiveShape();
   };
 
   const clearCanvasSelection = useCallback(() => {
+    cancelActiveMarking();
+    closeDrawingMenu();
+    closeShapeMenu();
+    finishStickyNoteEdit();
+    finishTextBoxEdit();
     cancelActiveGesture();
-    setSelectedImageId(null);
-    setOpenMenuId(null);
+    setSelectedItemId(null);
+    setOpenItemMenuId(null);
+    setOpenColorPickerId(null);
+    setStickyNoteEdit(null);
+    setPendingStickyNote(null);
+    setTextBoxEdit(null);
+    setPendingTextBox(null);
     closeSlideMenu();
-  }, [cancelActiveGesture, closeSlideMenu]);
+  }, [
+    cancelActiveGesture,
+    cancelActiveMarking,
+    closeDrawingMenu,
+    closeShapeMenu,
+    closeSlideMenu,
+    finishStickyNoteEdit,
+    finishTextBoxEdit,
+  ]);
 
   const selectSlide = useCallback(
     (slideId: string) => {
@@ -868,7 +3464,39 @@ export default function BoardApp() {
     updateOverviewScrollAvailability,
   ]);
 
-  const images = history.present;
+  const visibleHistoryItems =
+    pendingErase?.slideId === deck.activeSlideId
+      ? pendingErase.items
+      : history.present;
+  const itemsWithStickyNote =
+    pendingStickyNote?.slideId === deck.activeSlideId
+      ? [...visibleHistoryItems, pendingStickyNote.note]
+      : visibleHistoryItems;
+  const itemsWithTextBox =
+    pendingTextBox?.slideId === deck.activeSlideId
+      ? [...itemsWithStickyNote, pendingTextBox.box]
+      : itemsWithStickyNote;
+  const itemsBeforeTextDraft =
+    pendingShape?.slideId === deck.activeSlideId
+      ? [...itemsWithTextBox, pendingShape.shape]
+      : itemsWithTextBox;
+  const items = itemsBeforeTextDraft.map((item) =>
+    item.kind === 'text-box' && textBoxEdit?.itemId === item.id
+      ? textBoxWithHeight(
+          { ...item, text: textBoxEdit.draft },
+          textBoxEdit.height,
+        )
+      : item,
+  );
+  const inkRuns = getInkRuns(items);
+  const canvasObjects = items.filter((item) => item.kind !== 'stroke');
+  const selectedTextBox = canvasObjects.find(
+    (item): item is CanvasTextBox =>
+      item.id === selectedItemId && item.kind === 'text-box',
+  );
+  const itemLayer = new Map(
+    items.map((item, index) => [item.id, index + 1] as const),
+  );
 
   return (
     <main className="app-shell">
@@ -984,7 +3612,7 @@ export default function BoardApp() {
                           aria-current={isActive ? 'page' : undefined}
                           onClick={() => selectSlide(slide.id)}
                         >
-                          <SlidePreview images={slide.history.present} />
+                          <SlidePreview items={slide.history.present} />
                         </button>
                         {isActive ? (
                           <div
@@ -1107,18 +3735,144 @@ export default function BoardApp() {
           </button>
         </div>
         <span className="command-divider" aria-hidden="true" />
-        <div className="zoom-control" aria-hidden="true">
-          <ZoomIn />
-          <ChevronDown />
-        </div>
-        <span className="command-divider" aria-hidden="true" />
-        <span className="command-label background-label" aria-hidden="true">
-          Set background
-        </span>
-        <span className="command-divider" aria-hidden="true" />
-        <span className="command-label clear-label" aria-hidden="true">
-          Clear frame
-        </span>
+        {selectedTextBox ? (
+          <div
+            className="text-format-toolbar"
+            role="toolbar"
+            aria-label="Text formatting"
+            data-text-format-toolbar
+            onBlur={(event) => {
+              if (
+                event.relatedTarget instanceof Node &&
+                event.currentTarget.contains(event.relatedTarget)
+              ) {
+                return;
+              }
+              if (textBoxEdit?.itemId === selectedTextBox.id) {
+                finishTextBoxEdit();
+              }
+            }}
+          >
+            <label className="text-style-control">
+              <span className="sr-only">Text style</span>
+              <select
+                aria-label="Text style"
+                value={selectedTextBox.style}
+                onChange={(event) =>
+                  changeTextBoxStyle(
+                    selectedTextBox.id,
+                    event.currentTarget.value as TextBoxStyle,
+                  )
+                }
+              >
+                {textBoxStyles.map((style) => (
+                  <option key={style.id} value={style.id}>
+                    {style.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </label>
+
+            <span className="text-format-divider" aria-hidden="true" />
+            <div
+              className="text-color-options"
+              role="radiogroup"
+              aria-label="Text color"
+            >
+              {textBoxColors.map((color) => (
+                <button
+                  key={color.id}
+                  type="button"
+                  className={`text-color-choice${
+                    color.id === 'white' ? ' is-white' : ''
+                  }`}
+                  role="radio"
+                  aria-label={color.label}
+                  aria-checked={selectedTextBox.color === color.id}
+                  tabIndex={selectedTextBox.color === color.id ? 0 : -1}
+                  title={color.label}
+                  style={
+                    { '--text-swatch-color': color.value } as CSSProperties
+                  }
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() =>
+                    changeTextBoxColor(selectedTextBox.id, color.id)
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      changeTextBoxColor(selectedTextBox.id, color.id);
+                      return;
+                    }
+                    moveColorChoiceFocus(event)?.click();
+                  }}
+                >
+                  <span aria-hidden="true" />
+                </button>
+              ))}
+            </div>
+
+            <span className="text-format-divider" aria-hidden="true" />
+            <div
+              className="text-alignment-options"
+              role="radiogroup"
+              aria-label="Text alignment"
+            >
+              {(
+                [
+                  ['left', 'Left align', AlignLeft],
+                  ['center', 'Center align', AlignCenter],
+                  ['right', 'Right align', AlignRight],
+                ] as const
+              ).map(([alignment, label, Icon]) => (
+                <button
+                  key={alignment}
+                  type="button"
+                  role="radio"
+                  aria-label={label}
+                  aria-checked={selectedTextBox.alignment === alignment}
+                  tabIndex={
+                    selectedTextBox.alignment === alignment ? 0 : -1
+                  }
+                  title={label}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() =>
+                    changeTextBoxAlignment(selectedTextBox.id, alignment)
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      changeTextBoxAlignment(selectedTextBox.id, alignment);
+                      return;
+                    }
+                    moveColorChoiceFocus(event)?.click();
+                  }}
+                >
+                  <Icon aria-hidden="true" />
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="zoom-control" aria-hidden="true">
+              <ZoomIn />
+              <ChevronDown />
+            </div>
+            <span className="command-divider" aria-hidden="true" />
+            <span
+              className="command-label background-label"
+              aria-hidden="true"
+            >
+              Set background
+            </span>
+            <span className="command-divider" aria-hidden="true" />
+            <span className="command-label clear-label" aria-hidden="true">
+              Clear frame
+            </span>
+          </>
+        )}
       </div>
 
       <section
@@ -1128,103 +3882,692 @@ export default function BoardApp() {
       >
         <div
           ref={boardRef}
-          className="board"
+          className={`board${
+            selectedToolId === 'sticky-note' ? ' is-placing-sticky-note' : ''
+          }${selectedToolId === 'pen' ? ' is-drawing' : ''}${
+            selectedToolId === 'eraser' ? ' is-erasing' : ''
+          }${
+            selectedToolId === 'laser-pointer' ? ' is-laser-pointing' : ''
+          }${selectedToolId === 'shape' ? ' is-placing-shape' : ''}${
+            selectedToolId === 'text-box' ? ' is-placing-text-box' : ''
+          }`}
           role="region"
           tabIndex={0}
-          aria-label="Board. Paste an image, then drag it to move it."
+          aria-label={
+            selectedToolId === 'eraser'
+              ? 'Board. Ink eraser active. Drag over ink to erase; objects are unaffected.'
+              : selectedToolId === 'laser-pointer'
+                ? 'Board. Laser pointer active. Drag to draw a temporary red trail.'
+              : selectedToolId === 'shape'
+                ? `Board. ${getShapeOption(activeShape).label} tool active. Drag to create a shape.`
+                : selectedToolId === 'text-box'
+                  ? 'Board. Text box tool active. Click anywhere to place text.'
+                : 'Board. Draw, add sticky notes or text, or paste images.'
+          }
           onPointerDown={(event) => {
             if (event.currentTarget !== event.target) return;
-            setSelectedImageId(null);
-            setOpenMenuId(null);
+            if (selectedToolId === 'sticky-note') {
+              event.preventDefault();
+              placeStickyNote(event.clientX, event.clientY);
+              return;
+            }
+            if (selectedToolId === 'text-box') {
+              event.preventDefault();
+              placeTextBox(event.clientX, event.clientY);
+              return;
+            }
+            finishStickyNoteEdit();
+            finishTextBoxEdit();
+            setSelectedItemId(null);
+            setOpenItemMenuId(null);
+            setOpenColorPickerId(null);
           }}
           onPointerMove={handlePointerMove}
           onPointerUp={finishGesture}
           onPointerCancel={finishGesture}
         >
-          {images.map((image) => {
-            const isSelected = selectedImageId === image.id;
-            const isMenuOpen = openMenuId === image.id;
+          {canvasObjects.map((item) => {
+            const isPendingStickyNote =
+              pendingStickyNote?.note.id === item.id;
+            const isPendingTextBox = pendingTextBox?.box.id === item.id;
+            const isCreatingShape = pendingShape?.shape.id === item.id;
+            const isPending =
+              isPendingStickyNote || isPendingTextBox || isCreatingShape;
+            const isDiscarding =
+              isPendingStickyNote && pendingStickyNote?.discarding === true;
+            const isSelected = selectedItemId === item.id;
+            const isMenuOpen = openItemMenuId === item.id;
+            const isColorPickerOpen = openColorPickerId === item.id;
+            const isRemovingBackground =
+              item.kind === 'image' &&
+              backgroundRemovalJobKeys.has(
+                backgroundRemovalJobKey(deck.activeSlideId, item.id),
+              );
+            const itemLabel =
+              item.kind === 'image'
+                ? 'image'
+                : item.kind === 'sticky-note'
+                  ? 'sticky note'
+                  : item.kind === 'text-box'
+                    ? 'text box'
+                    : 'shape';
+            const itemExtents = rotatedItemExtents(item);
+            const colorPickerPosition = [
+              item.x - itemExtents.horizontal < BOARD_WIDTH * 0.35
+                ? ' opens-right'
+                : '',
+              item.x + itemExtents.horizontal > BOARD_WIDTH - 96
+                ? ' is-contained-right'
+                : '',
+              item.y + itemExtents.vertical > BOARD_HEIGHT - 96
+                ? ' is-contained-bottom'
+                : '',
+            ].join('');
             const frameStyle = {
-              transform: `rotate(${image.rotation}deg)`,
-              '--counter-rotation': `${-image.rotation}deg`,
+              transform: `rotate(${item.rotation}deg)`,
+              '--counter-rotation': `${-item.rotation}deg`,
             } as CSSProperties;
 
             return (
               <div
-                key={image.id}
-                className={`canvas-item${isSelected ? ' is-selected' : ''}`}
+                key={item.id}
+                className={`canvas-item${isSelected ? ' is-selected' : ''}${
+                  isDiscarding ? ' is-discarding' : ''
+                }${isCreatingShape ? ' is-creating-shape' : ''}`}
                 style={{
-                  left: `${(image.x / BOARD_WIDTH) * 100}%`,
-                  top: `${(image.y / BOARD_HEIGHT) * 100}%`,
-                  width: `${(image.width / BOARD_WIDTH) * 100}%`,
-                  height: `${(image.height / BOARD_HEIGHT) * 100}%`,
+                  left: `${(item.x / BOARD_WIDTH) * 100}%`,
+                  top: `${(item.y / BOARD_HEIGHT) * 100}%`,
+                  width: `${(item.width / BOARD_WIDTH) * 100}%`,
+                  height: `${(item.height / BOARD_HEIGHT) * 100}%`,
+                  zIndex: isSelected
+                    ? items.length + 2
+                    : itemLayer.get(item.id),
                 }}
-                data-image-id={image.id}
+                data-item-id={item.id}
+                data-item-type={item.kind}
+                data-shape-type={
+                  item.kind === 'shape' ? item.shape : undefined
+                }
+                data-shape-color={
+                  item.kind === 'shape' ? item.color : undefined
+                }
+                data-arrow-direction={
+                  item.kind === 'shape' && item.shape === 'arrow'
+                    ? (item.arrowDirection ?? 'right')
+                    : undefined
+                }
+                data-text-style={
+                  item.kind === 'text-box' ? item.style : undefined
+                }
+                data-text-color={
+                  item.kind === 'text-box' ? item.color : undefined
+                }
+                data-text-alignment={
+                  item.kind === 'text-box' ? item.alignment : undefined
+                }
+                data-text-scale={
+                  item.kind === 'text-box' ? item.scale : undefined
+                }
               >
                 <div
-                  className={`canvas-image-frame${isSelected ? ' is-selected' : ''}`}
+                  ref={(element) => {
+                    if (element) itemFrameRefsRef.current.set(item.id, element);
+                    else itemFrameRefsRef.current.delete(item.id);
+                  }}
+                  className={`canvas-item-frame${isSelected ? ' is-selected' : ''}${
+                    item.kind === 'text-box' &&
+                    textBoxEdit?.itemId === item.id
+                      ? ' is-text-editing'
+                      : ''
+                  }`}
                   style={frameStyle}
-                  onPointerDown={(event) => startGesture(event, image, 'move')}
+                  role="group"
+                  tabIndex={0}
+                  aria-busy={isRemovingBackground || undefined}
+                  aria-label={
+                    item.kind === 'image'
+                      ? item.name
+                      : item.kind === 'sticky-note'
+                        ? `Sticky note: ${item.text.trim() || 'Blank'}`
+                        : item.kind === 'text-box'
+                          ? `Text box: ${item.text.trim() || 'Blank'}`
+                          : `${getShapeOption(item.shape).label} shape`
+                  }
+                  onDoubleClick={(event) => {
+                    if (
+                      item.kind !== 'sticky-note' &&
+                      item.kind !== 'text-box'
+                    ) {
+                      return;
+                    }
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (item.kind === 'sticky-note') beginStickyNoteEdit(item);
+                    else beginTextBoxEdit(item);
+                  }}
+                  onFocus={(event) => {
+                    if (event.currentTarget !== event.target) return;
+                    setSelectedItemId(item.id);
+                    setOpenItemMenuId(null);
+                    setOpenColorPickerId(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (
+                      event.currentTarget !== event.target ||
+                      isPending ||
+                      (item.kind !== 'sticky-note' &&
+                        item.kind !== 'text-box') ||
+                      (event.key !== 'Enter' && event.key !== 'F2')
+                    ) {
+                      return;
+                    }
+                    event.preventDefault();
+                    if (item.kind === 'sticky-note') beginStickyNoteEdit(item);
+                    else beginTextBoxEdit(item);
+                  }}
+                  onPointerDown={(event) => {
+                    if (isPending) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      return;
+                    }
+                    startGesture(event, item, 'move');
+                  }}
                 >
-                  <img
-                    className="canvas-image"
-                    src={image.src}
-                    alt={image.name}
-                    draggable={false}
-                  />
+                  {item.kind === 'image' ? (
+                    <img
+                      className="canvas-image"
+                      src={activeImageSource(item)}
+                      alt={item.name}
+                      draggable={false}
+                    />
+                  ) : item.kind === 'sticky-note' ? (
+                    <StickyNoteContent
+                      note={item}
+                      draft={
+                        stickyNoteEdit?.itemId === item.id
+                          ? stickyNoteEdit.draft
+                          : undefined
+                      }
+                      onDraftChange={(draft) =>
+                        setStickyNoteEdit((current) =>
+                          current?.itemId === item.id
+                            ? { ...current, draft }
+                            : current,
+                        )
+                      }
+                      onFinishEditing={finishStickyNoteEdit}
+                    />
+                  ) : item.kind === 'text-box' ? (
+                    <TextBoxContent
+                      box={item}
+                      draft={
+                        textBoxEdit?.itemId === item.id
+                          ? textBoxEdit.draft
+                          : undefined
+                      }
+                      onDraftChange={(draft) =>
+                        setTextBoxEdit((current) =>
+                          current?.itemId === item.id
+                            ? { ...current, draft }
+                            : current,
+                        )
+                      }
+                      onFinishEditing={finishTextBoxEdit}
+                      onHeightChange={(height) =>
+                        syncTextBoxHeight(item.id, height)
+                      }
+                    />
+                  ) : (
+                    <ShapeContent
+                      arrowDirection={item.arrowDirection}
+                      color={item.color}
+                      filled={item.filled}
+                      shape={item.shape}
+                      />
+                    )}
+
+                  {isRemovingBackground ? (
+                    <span
+                      className="background-removal-indicator"
+                      aria-hidden="true"
+                    >
+                      <span />
+                    </span>
+                  ) : null}
 
                   {isSelected ? (
                     <>
                       <span className="selection-outline" aria-hidden="true" />
-                      <button
-                        type="button"
-                        className="rotation-zone"
-                        aria-label="Rotate image"
-                        title="Drag around the image to rotate. Hold Shift to snap."
-                        onPointerDown={(event) =>
-                          startGesture(event, image, 'rotate')
-                        }
-                      />
+                      {!isPending ? (
+                        <>
+                          <button
+                            type="button"
+                            className="rotation-zone"
+                            aria-label={`Rotate ${itemLabel}`}
+                            title={`Drag around the ${itemLabel} to rotate. Hold Shift to snap.`}
+                            onPointerDown={(event) =>
+                              startGesture(event, item, 'rotate')
+                            }
+                          />
 
-                      {resizeCorners.map((corner) => (
-                        <button
-                          key={corner}
-                          type="button"
-                          className={`resize-handle resize-${corner}`}
-                          aria-label={`Resize image from ${corner.toUpperCase()} corner`}
-                          title="Drag to resize"
-                          onPointerDown={(event) =>
-                            startGesture(event, image, 'resize', corner)
-                          }
-                        />
-                      ))}
+                          {resizeCorners.map((corner) => (
+                            <button
+                              key={corner}
+                              type="button"
+                              className={`resize-handle resize-${corner}`}
+                              aria-label={`Resize ${itemLabel} from ${corner.toUpperCase()} corner`}
+                              title={
+                                item.kind === 'text-box'
+                                  ? 'Drag to scale the text'
+                                  : 'Drag to resize'
+                              }
+                              onPointerDown={(event) =>
+                                startGesture(event, item, 'resize', corner)
+                              }
+                            />
+                          ))}
 
-                      <div
-                        className="item-menu-anchor"
-                        data-item-menu={image.id}
-                        onPointerDown={(event) => event.stopPropagation()}
-                      >
-                        <button
-                          type="button"
-                          className="item-menu-button"
-                          aria-label="Image options"
-                          aria-expanded={isMenuOpen}
-                          aria-haspopup="menu"
-                          onClick={() =>
-                            setOpenMenuId((current) =>
-                              current === image.id ? null : image.id,
-                            )
-                          }
+                          {item.kind === 'text-box' ? (
+                            <>
+                              <button
+                                type="button"
+                                className="resize-side-handle resize-w"
+                                aria-label="Resize text box from left side"
+                                title="Drag to change width and reflow text"
+                                onPointerDown={(event) =>
+                                  startGesture(
+                                    event,
+                                    item,
+                                    'resize-width',
+                                    'w',
+                                  )
+                                }
+                              />
+                              <button
+                                type="button"
+                                className="resize-side-handle resize-e"
+                                aria-label="Resize text box from right side"
+                                title="Drag to change width and reflow text"
+                                onPointerDown={(event) =>
+                                  startGesture(
+                                    event,
+                                    item,
+                                    'resize-width',
+                                    'e',
+                                  )
+                                }
+                              />
+                            </>
+                          ) : null}
+                        </>
+                      ) : null}
+
+                      {item.kind === 'sticky-note' ? (
+                        <div
+                          className={`note-color-anchor${
+                            isColorPickerOpen ? ' is-open' : ''
+                          }${colorPickerPosition}`}
+                          data-color-picker={item.id}
+                          onPointerDown={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                          }}
+                          onDoubleClick={(event) => event.stopPropagation()}
                         >
-                          <MoreVertical aria-hidden="true" />
-                        </button>
+                          {isColorPickerOpen ? (
+                            <div
+                              className="note-color-options"
+                              role="radiogroup"
+                              aria-label="Sticky note color"
+                            >
+                              {stickyNoteColors.map((color) => (
+                                <button
+                                  key={color.id}
+                                  ref={
+                                    item.color === color.id
+                                      ? activeColorChoiceRef
+                                      : undefined
+                                  }
+                                  type="button"
+                                  className={`note-color-choice${
+                                    color.id === 'transparent'
+                                      ? ' is-no-fill'
+                                      : ''
+                                  }`}
+                                  role="radio"
+                                  aria-label={color.label}
+                                  aria-checked={item.color === color.id}
+                                  tabIndex={item.color === color.id ? 0 : -1}
+                                  title={color.label}
+                                  style={
+                                    {
+                                      '--note-swatch-color': color.value,
+                                    } as CSSProperties
+                                  }
+                                  onClick={() =>
+                                    changeStickyNoteColor(item.id, color.id)
+                                  }
+                                  onKeyDown={(event) => {
+                                    if (
+                                      event.key === 'Enter' ||
+                                      event.key === ' '
+                                    ) {
+                                      event.preventDefault();
+                                      changeStickyNoteColor(item.id, color.id);
+                                      return;
+                                    }
+                                    moveColorChoiceFocus(event);
+                                  }}
+                                >
+                                  <span aria-hidden="true" />
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="note-color-trigger"
+                              aria-label="Change sticky note color"
+                              aria-expanded={false}
+                              title="Change color"
+                              onKeyDown={(event) => {
+                                if (
+                                  event.key !== 'Enter' &&
+                                  event.key !== ' '
+                                ) {
+                                  return;
+                                }
+                                event.preventDefault();
+                                focusColorPickerOnOpenRef.current = true;
+                                setOpenColorPickerId(item.id);
+                              }}
+                              onClick={(event) => {
+                                focusColorPickerOnOpenRef.current =
+                                  event.detail === 0;
+                                setOpenColorPickerId(item.id);
+                              }}
+                            >
+                              <span
+                                className={
+                                  item.color === 'transparent'
+                                    ? 'is-no-fill'
+                                    : undefined
+                                }
+                                style={{
+                                  backgroundColor: getStickyNoteColorValue(
+                                    item.color,
+                                  ),
+                                }}
+                                aria-hidden="true"
+                              />
+                            </button>
+                          )}
+                        </div>
+                      ) : item.kind === 'shape' ? (
+                        <div
+                          className={`note-color-anchor${
+                            isColorPickerOpen ? ' is-open' : ''
+                          }${colorPickerPosition}`}
+                          data-color-picker={item.id}
+                          onPointerDown={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                          }}
+                        >
+                          {isColorPickerOpen ? (
+                            <div
+                              className="note-color-options"
+                              role="radiogroup"
+                              aria-label="Shape color"
+                            >
+                              {shapeColors.map((color) => (
+                                <button
+                                  key={color.id}
+                                  ref={
+                                    item.color === color.id
+                                      ? activeColorChoiceRef
+                                      : undefined
+                                  }
+                                  type="button"
+                                  className="note-color-choice shape-color-choice"
+                                  role="radio"
+                                  aria-label={color.label}
+                                  aria-checked={item.color === color.id}
+                                  tabIndex={item.color === color.id ? 0 : -1}
+                                  title={color.label}
+                                  style={
+                                    {
+                                      '--note-swatch-color': color.fill,
+                                      '--shape-swatch-stroke':
+                                        color.id === 'white'
+                                          ? '#bdc1c6'
+                                          : color.stroke,
+                                    } as CSSProperties
+                                  }
+                                  onClick={() =>
+                                    changeShapeColor(item.id, color.id)
+                                  }
+                                  onKeyDown={(event) => {
+                                    if (
+                                      event.key === 'Enter' ||
+                                      event.key === ' '
+                                    ) {
+                                      event.preventDefault();
+                                      changeShapeColor(item.id, color.id);
+                                      return;
+                                    }
+                                    moveColorChoiceFocus(event);
+                                  }}
+                                >
+                                  <span aria-hidden="true" />
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="note-color-trigger shape-color-trigger"
+                              aria-label="Change shape color"
+                              aria-expanded={false}
+                              title="Change color"
+                              onKeyDown={(event) => {
+                                if (
+                                  event.key !== 'Enter' &&
+                                  event.key !== ' '
+                                ) {
+                                  return;
+                                }
+                                event.preventDefault();
+                                focusColorPickerOnOpenRef.current = true;
+                                setOpenColorPickerId(item.id);
+                              }}
+                              onClick={(event) => {
+                                focusColorPickerOnOpenRef.current =
+                                  event.detail === 0;
+                                setOpenColorPickerId(item.id);
+                              }}
+                            >
+                              <span
+                                className={
+                                  item.filled === false
+                                    ? 'is-no-fill'
+                                    : undefined
+                                }
+                                style={{
+                                  backgroundColor: getShapeColorValue(
+                                    item.color,
+                                  ).fill,
+                                  boxShadow: `inset 0 0 0 2px ${
+                                    item.color === 'white'
+                                      ? '#bdc1c6'
+                                      : getShapeColorValue(item.color).stroke
+                                  }`,
+                                }}
+                                aria-hidden="true"
+                              />
+                            </button>
+                          )}
+                        </div>
+                      ) : null}
 
-                        {isMenuOpen ? (
-                          <div className="item-menu-popover" role="menu">
+                      {!isPending ? (
+                        <div
+                          className="item-menu-anchor"
+                          data-item-menu={item.id}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onDoubleClick={(event) => event.stopPropagation()}
+                          onBlur={(event) => {
+                            const nextFocused = event.relatedTarget;
+                            if (
+                              nextFocused instanceof Node &&
+                              event.currentTarget.contains(nextFocused)
+                            ) {
+                              return;
+                            }
+                            setOpenItemMenuId((current) =>
+                              current === item.id ? null : current,
+                            );
+                          }}
+                        >
+                          <button
+                            ref={(element) => {
+                              if (element) {
+                                itemMenuButtonRefsRef.current.set(
+                                  item.id,
+                                  element,
+                                );
+                              } else {
+                                itemMenuButtonRefsRef.current.delete(item.id);
+                              }
+                            }}
+                            type="button"
+                            className="item-menu-button"
+                            aria-label={`${itemLabel} options`}
+                            aria-expanded={isMenuOpen}
+                            aria-haspopup="menu"
+                            aria-controls={
+                              isMenuOpen ? `item-menu-${item.id}` : undefined
+                            }
+                            onClick={(event) => {
+                              const opening = openItemMenuId !== item.id;
+                              focusItemMenuOnOpenRef.current =
+                                opening && event.detail === 0;
+                              setOpenItemMenuId((current) =>
+                                current === item.id ? null : item.id,
+                              );
+                            }}
+                          >
+                            <MoreVertical aria-hidden="true" />
+                          </button>
+
+                          {isMenuOpen ? (
+                            <div
+                            id={`item-menu-${item.id}`}
+                            className="item-menu-popover"
+                            role="menu"
+                            aria-label={`${itemLabel} options`}
+                            onFocus={(event) => {
+                              if (event.target instanceof HTMLButtonElement) {
+                                setItemMenuTabStop(
+                                  event.currentTarget,
+                                  event.target,
+                                );
+                              }
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Tab') {
+                                setOpenItemMenuId(null);
+                                if (event.shiftKey) {
+                                  event.preventDefault();
+                                  itemMenuButtonRefsRef.current
+                                    .get(item.id)
+                                    ?.focus({ preventScroll: true });
+                                }
+                                return;
+                              }
+                              moveItemMenuFocus(event);
+                            }}
+                          >
                             <button
                               type="button"
                               role="menuitem"
-                              onClick={() => rotateImage(image.id, -15)}
+                              tabIndex={0}
+                              onClick={() => duplicateItem(item)}
+                            >
+                              <CopyPlus aria-hidden="true" />
+                              Duplicate {itemLabel}
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              tabIndex={-1}
+                              onClick={() => copyItem(item)}
+                            >
+                              <Copy aria-hidden="true" />
+                              Copy {itemLabel}
+                            </button>
+                            {item.kind === 'text-box' ? (
+                              <>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  tabIndex={-1}
+                                  disabled={itemLayer.get(item.id) === items.length}
+                                  onClick={() => moveItemLayer(item.id, 1)}
+                                >
+                                  <BringToFront aria-hidden="true" />
+                                  Bring forward
+                                </button>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  tabIndex={-1}
+                                  disabled={itemLayer.get(item.id) === 1}
+                                  onClick={() => moveItemLayer(item.id, -1)}
+                                >
+                                  <SendToBack aria-hidden="true" />
+                                  Send backward
+                                </button>
+                              </>
+                            ) : null}
+                            {item.kind === 'shape' ? (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                tabIndex={-1}
+                                onClick={() => toggleShapeFill(item.id)}
+                              >
+                                <PaintBucket aria-hidden="true" />
+                                {item.filled === false
+                                  ? 'Add fill'
+                                  : 'Remove fill'}
+                              </button>
+                            ) : null}
+                            {item.kind === 'image' &&
+                            BACKGROUND_REMOVAL_ENABLED ? (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                tabIndex={-1}
+                                disabled={isRemovingBackground}
+                                onClick={() => toggleImageBackground(item)}
+                              >
+                                <ImageOff aria-hidden="true" />
+                                {isRemovingBackground
+                                  ? 'Removing background…'
+                                  : item.backgroundRemoved === true &&
+                                      item.backgroundRemovedSrc
+                                    ? 'Restore background'
+                                    : 'Remove background'}
+                              </button>
+                            ) : null}
+                            <span className="item-menu-divider" aria-hidden="true" />
+                            <button
+                              type="button"
+                              role="menuitem"
+                              tabIndex={-1}
+                              onClick={() => rotateItem(item.id, -15)}
                             >
                               <RotateCcw aria-hidden="true" />
                               Rotate left
@@ -1232,7 +4575,8 @@ export default function BoardApp() {
                             <button
                               type="button"
                               role="menuitem"
-                              onClick={() => rotateImage(image.id, 15)}
+                              tabIndex={-1}
+                              onClick={() => rotateItem(item.id, 15)}
                             >
                               <RotateCw aria-hidden="true" />
                               Rotate right
@@ -1241,21 +4585,156 @@ export default function BoardApp() {
                             <button
                               type="button"
                               role="menuitem"
-                              className="delete-image-action"
-                              onClick={() => deleteImage(image.id)}
+                              tabIndex={-1}
+                              className="delete-item-action"
+                              onClick={() => deleteItem(item.id)}
                             >
                               <Trash2 aria-hidden="true" />
-                              Delete image
+                              Delete {itemLabel}
                             </button>
-                          </div>
-                        ) : null}
-                      </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </>
                   ) : null}
                 </div>
               </div>
             );
           })}
+
+          {inkRuns.map((run) => (
+            <svg
+              key={run.id}
+              className="completed-ink-layer"
+              viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`}
+              preserveAspectRatio="none"
+              aria-hidden="true"
+              style={{ zIndex: run.layer }}
+            >
+              {run.strokes.map((stroke) => (
+                <InkStrokePath key={stroke.id} stroke={stroke} />
+              ))}
+            </svg>
+          ))}
+
+          {selectedToolId === 'pen' ||
+          selectedToolId === 'eraser' ||
+          selectedToolId === 'laser-pointer' ||
+          selectedToolId === 'shape' ||
+          selectedToolId === 'text-box' ? (
+            <div
+              ref={drawingSurfaceRef}
+              className={`drawing-surface${
+                selectedToolId === 'eraser' ? ' is-erasing' : ''
+              }${
+                selectedToolId === 'laser-pointer'
+                  ? ' is-laser-pointing'
+                  : ''
+              }${selectedToolId === 'shape' ? ' is-shaping' : ''}${
+                selectedToolId === 'text-box' ? ' is-placing-text' : ''
+              }`}
+              aria-hidden="true"
+              onPointerDown={
+                selectedToolId === 'pen'
+                  ? startInkStroke
+                  : selectedToolId === 'eraser'
+                    ? startEraserStroke
+                    : selectedToolId === 'laser-pointer'
+                      ? startLaserTrail
+                      : selectedToolId === 'shape'
+                        ? startShapeCreation
+                        : (event) => {
+                            if (event.button !== 0 || !event.isPrimary) return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            placeTextBox(event.clientX, event.clientY);
+                          }
+              }
+              onPointerMove={
+                selectedToolId === 'pen'
+                  ? moveInkStroke
+                  : selectedToolId === 'eraser'
+                    ? moveEraserStroke
+                    : selectedToolId === 'laser-pointer'
+                      ? moveLaserTrail
+                      : selectedToolId === 'shape'
+                        ? updateShapeCreation
+                        : undefined
+              }
+              onPointerUp={
+                selectedToolId === 'pen'
+                  ? finishInkStroke
+                  : selectedToolId === 'eraser'
+                    ? finishEraserStroke
+                    : selectedToolId === 'laser-pointer'
+                      ? finishLaserTrail
+                      : selectedToolId === 'shape'
+                        ? finishShapeCreation
+                        : undefined
+              }
+              onPointerCancel={
+                selectedToolId === 'pen'
+                  ? cancelInkStroke
+                  : selectedToolId === 'eraser'
+                    ? cancelEraserStroke
+                    : selectedToolId === 'laser-pointer'
+                      ? cancelLaserTrail
+                      : selectedToolId === 'shape'
+                        ? cancelShapeCreation
+                        : undefined
+              }
+              onLostPointerCapture={
+                selectedToolId === 'pen'
+                  ? cancelInkStroke
+                  : selectedToolId === 'eraser'
+                    ? cancelEraserStroke
+                    : selectedToolId === 'laser-pointer'
+                      ? cancelLaserTrail
+                      : selectedToolId === 'shape'
+                        ? cancelShapeCreation
+                        : undefined
+              }
+              onPointerEnter={
+                selectedToolId === 'eraser' ? showEraserPreview : undefined
+              }
+              onPointerLeave={() => {
+                if (!eraserGestureRef.current) setEraserPreview(null);
+              }}
+            >
+              <svg
+                className={
+                  selectedToolId === 'laser-pointer'
+                    ? 'laser-trail-layer'
+                    : undefined
+                }
+                viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`}
+                preserveAspectRatio="none"
+              >
+                {selectedToolId === 'pen' && pendingStroke ? (
+                  <InkStrokePath
+                    ref={activeInkRendererRef}
+                    live
+                    stroke={pendingStroke}
+                  />
+                ) : null}
+                {selectedToolId === 'laser-pointer' ? (
+                  <LaserTrailLayer ref={activeLaserRendererRef} />
+                ) : null}
+              </svg>
+              {selectedToolId === 'eraser' && eraserPreview ? (
+                <span
+                  className="eraser-cursor"
+                  style={{
+                    left: `${(eraserPreview.x / BOARD_WIDTH) * 100}%`,
+                    top: `${(eraserPreview.y / BOARD_HEIGHT) * 100}%`,
+                    width: `${((eraserPreview.radius * 2) / BOARD_WIDTH) * 100}%`,
+                    height: `${((eraserPreview.radius * 2) / BOARD_HEIGHT) * 100}%`,
+                  }}
+                />
+              ) : null}
+            </div>
+          ) : null}
 
           {notice ? (
             <div className="board-notice" role="status" aria-live="polite">
@@ -1270,14 +4749,74 @@ export default function BoardApp() {
         aria-label="Board tools"
         inert={isSlideOverviewOpen}
       >
-        {tools.map((tool, index) => (
-          <ToolButton
-            key={tool.label}
-            tool={tool}
-            selected={selectedTool === index}
-            onSelect={() => setSelectedTool(index)}
-          />
-        ))}
+        {tools.map((tool) => {
+          if (tool.id === 'pen') {
+            return (
+              <div
+                key={tool.id}
+                className="drawing-menu-anchor"
+                data-drawing-menu
+              >
+                <ToolButton
+                  buttonRef={penToolButtonRef}
+                  controls="drawing-options"
+                  expanded={isDrawingMenuOpen}
+                  tool={tool}
+                  selected={selectedToolId === tool.id}
+                  onSelect={() => selectTool(tool)}
+                />
+                {isDrawingMenuOpen ? (
+                  <DrawingMenu
+                    style={drawingStyle}
+                    color={drawingColor}
+                    onStyleChange={setDrawingStyle}
+                    onColorChange={setDrawingColor}
+                  />
+                ) : null}
+              </div>
+            );
+          }
+
+          if (tool.id === 'shape') {
+            return (
+              <div
+                key={tool.id}
+                className="shape-menu-anchor"
+                data-shape-menu
+              >
+                <ToolButton
+                  buttonRef={shapeToolButtonRef}
+                  controls="shape-options"
+                  expanded={isShapeMenuOpen}
+                  glyph={<ShapeContent icon shape={activeShape} />}
+                  tool={tool}
+                  selected={selectedToolId === tool.id}
+                  onSelect={(event) => {
+                    setFocusShapeMenuSelection(event.detail === 0);
+                    selectTool(tool);
+                  }}
+                />
+                {isShapeMenuOpen ? (
+                  <ShapeMenu
+                    focusSelected={focusShapeMenuSelection}
+                    shape={activeShape}
+                    onShapeFocus={setActiveShape}
+                    onShapeSelect={chooseShape}
+                  />
+                ) : null}
+              </div>
+            );
+          }
+
+          return (
+            <ToolButton
+              key={tool.id}
+              tool={tool}
+              selected={selectedToolId === tool.id}
+              onSelect={() => selectTool(tool)}
+            />
+          );
+        })}
       </nav>
     </main>
   );

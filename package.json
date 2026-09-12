@@ -9,10 +9,14 @@
     "dev": "concurrently --kill-others-on-fail --names api,web --prefix-colors blue,green \"npm:dev:api\" \"npm:dev:web\"",
     "dev:api": "python3 -m uvicorn untitled_jam.main:app --app-dir server/src --reload --host 127.0.0.1 --port 8000 --loop asyncio",
     "dev:web": "vite",
+    "preload:model": "PYTHONPATH=server/src python3 -m untitled_jam.preload_model",
     "build": "tsc --noEmit && vite build",
-    "start": "python3 -m uvicorn untitled_jam.main:app --app-dir server/src --host 0.0.0.0 --port 8000 --loop asyncio",
+    "build:site": "tsc --noEmit && vite build --config vite.sites.config.ts",
+    "start": "python3 -m uvicorn untitled_jam.main:app --app-dir server/src --host 0.0.0.0 --port 8000 --loop asyncio --workers 1",
     "lint": "eslint .",
-    "test": "python3 -m pytest"
+    "test": "npm run test:frontend && npm run test:backend",
+    "test:frontend": "vitest run",
+    "test:backend": "python3 -m pytest"
   },
   "dependencies": {
     "@fontsource/roboto": "^5.3.0",
@@ -21,8 +25,13 @@
     "react-dom": "19.2.6"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.54.5",
     "@eslint/js": "^9.39.4",
+    "@openai/sites-vite-plugin": "^0.2.0",
     "@tailwindcss/postcss": "4.2.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
@@ -32,10 +41,13 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
+    "jsdom": "^29.1.1",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.48.1",
-    "vite": "8.2.2"
+    "vite": "8.2.2",
+    "vitest": "^5.0.0",
+    "wrangler": "^4.129.1"
   },
   "type": "module"
 }

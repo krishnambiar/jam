@@ -18,7 +18,10 @@
   "include": [
     "app/src/**/*.ts",
     "app/src/**/*.tsx",
-    "vite.config.ts"
+    "vite.config.ts",
+    "vitest.config.ts",
+    "vite.sites.config.ts",
+    "worker/**/*.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }
